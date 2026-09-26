@@ -15,7 +15,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
-from .llm import LLM
+from .checks import check_picks, fatal, norm_url, similar
+from .llm import LLM, BudgetExceeded, Tool, strict_object
 from .models import Story
 
 log = logging.getLogger(__name__)
@@ -130,6 +131,7 @@ How to choose:
 - Use only facts present in the texts. Never invent numbers, names or quotes.
 
 Return JSON: {"stories": [ ... ]} with exactly the requested number of stories, most important first.
+Every url must be copied exactly from the texts; never build or guess a link.
 Each story: {
   "headline": "on-screen headline, at most 8 words",
   "summary": "3 to 5 sentences with the concrete facts from the texts: who, what, numbers, why it matters",
@@ -138,6 +140,17 @@ Each story: {
   "outlets": ["names of every newsletter or site that covered it"],
   "why": "one line on why it made the cut"
 }"""
+
+
+PICK_SCHEMA = strict_object({
+    "headline": {"type": "string"},
+    "summary": {"type": "string"},
+    "key_fact": {"type": "string"},
+    "url": {"type": "string"},
+    "outlets": {"type": "array", "items": {"type": "string"}},
+    "why": {"type": "string"},
+})
+EDITOR_SCHEMA = strict_object({"stories": {"type": "array", "items": PICK_SCHEMA}})
 
 
 class LLMEditor:
@@ -166,17 +179,28 @@ class LLMEditor:
         return "\n".join(parts)
 
     def pick(self, candidates: list[Story], n: int, seen: SeenStore) -> list[Story]:
-        data = self.llm.json(EDITOR_SYSTEM, self._prompt(candidates, n, seen), stage="editor")
+        data = self.llm.json(EDITOR_SYSTEM, self._prompt(candidates, n, seen), stage="editor", schema=EDITOR_SCHEMA)
+        return self.to_stories(data, candidates, n)
+
+    @staticmethod
+    def to_stories(data: dict, candidates: list[Story], n: int) -> list[Story]:
+        """Editor JSON -> Stories. A link that matches a feed article takes its date and publisher."""
         now = datetime.now(timezone.utc)
+        articles = {norm_url(c.url): c for c in candidates if c.kind == "article" and c.url}
         picked = []
         for item in data.get("stories", [])[:n]:
             outlets = [o for o in item.get("outlets", []) if o] or ["AI newsletters"]
+            url = (item.get("url") or "").strip()
+            match = articles.get(norm_url(url))
+            if match and match.source not in outlets:
+                outlets.append(match.source)
             picked.append(Story(
                 title=item.get("headline", "").strip(),
-                url=(item.get("url") or "").strip(),
-                source=outlets[0],
-                published=now,
+                url=url,
+                source=match.source if match else outlets[0],
+                published=match.published if match else now,
                 summary=item.get("summary", "").strip(),
+                popularity=match.popularity if match else 0.0,
                 headline=item.get("headline", "").strip(),
                 key_fact=item.get("key_fact", "").strip(),
                 outlets=outlets,
@@ -187,19 +211,146 @@ class LLMEditor:
         return picked
 
 
-def build_editor(llm: LLM | None, max_age_hours: float) -> Editor:
-    return LLMEditor(llm, max_age_hours) if llm else HeuristicEditor(max_age_hours)
+AGENT_TOOLS_NOTE = """
+
+You have two tools. Use them before you answer; a few calls are enough.
+- search_candidates(query): searches today's newsletters and feeds. Use it to find every outlet that covered an
+  event (more outlets means a bigger story) and the best link for it. A link must come from today's material.
+- aired_lookup(headline): checks whether a story already aired in the last two weeks."""
+
+REPAIR_PROMPT = """
+
+=== YOUR PICKS SO FAR ===
+{picks}
+
+=== PROBLEMS TO FIX ===
+{problems}
+
+Return the full list of {n} stories again. Keep the good ones exactly as they are and replace or fix only the
+ones with problems. A replacement must be a different real event from the texts above."""
+
+
+def _snippet(text: str, terms: list[str], width: int = 320) -> str:
+    low = text.lower()
+    pos = min((low.find(t) for t in terms if t in low), default=0)
+    start = max(pos - width // 3, 0)
+    return " ".join(text[start:start + width].split())
+
+
+def candidate_search(candidates: list[Story], query: str, limit: int = 8) -> dict:
+    terms = [t for t in re.findall(r"[a-z0-9][a-z0-9.+-]*", query.lower()) if len(t) > 1]
+    if not terms:
+        return {"matches": [], "outlets": 0}
+    hits = [c for c in candidates if all(t in f"{c.title} {c.summary} {c.body}".lower() for t in terms)]
+    rows = [{"source": c.source, "kind": c.kind, "title": c.title, "url": c.url,
+             "published": c.published.strftime("%Y-%m-%d %H:%M"), "popularity": round(c.popularity, 2),
+             "snippet": _snippet(f"{c.summary} {c.body}", terms)} for c in hits[:limit]]
+    return {"matches": rows, "outlets": len({c.source for c in hits})}
+
+
+def aired_search(seen: SeenStore, headline: str) -> dict:
+    scored = sorted(((similar(headline, e.get("headline", "")), e) for e in seen.entries if e.get("headline")),
+                    key=lambda x: x[0], reverse=True)
+    return {"aired": [{"date": e.get("date", ""), "headline": e["headline"], "similarity": round(r, 2)}
+                      for r, e in scored[:3] if r >= 0.45]}
+
+
+class AgentEditor:
+    """The LLM editor plus tools and a check-and-repair loop.
+
+    Draft with tools (OpenAI) or one plain call (other providers), then check the picks in
+    code: exactly n, no duplicates, not already aired, fresh, links taken from today's
+    material. Failing slots go back to the model up to ``max_repairs`` times.
+    """
+
+    name = "agent"
+
+    def __init__(self, llm: LLM, max_age_hours: float, max_repairs: int = 2):
+        self.llm, self.max_age_hours, self.max_repairs = llm, max_age_hours, max_repairs
+        self.base = LLMEditor(llm, max_age_hours)
+
+    def _tools(self, candidates: list[Story], seen: SeenStore) -> list[Tool]:
+        query = strict_object({"query": {"type": "string", "description": "a few keywords, e.g. a company and product"}})
+        headline = strict_object({"headline": {"type": "string"}})
+        return [
+            Tool("search_candidates", "Search today's newsletters and feed stories for an event.", query,
+                 lambda query: candidate_search(candidates, query)),
+            Tool("aired_lookup", "Check whether a similar story aired in the last two weeks.", headline,
+                 lambda headline: aired_search(seen, headline)),
+        ]
+
+    def pick(self, candidates: list[Story], n: int, seen: SeenStore) -> list[Story]:
+        prompt = self.base._prompt(candidates, n, seen)
+        if hasattr(self.llm, "run_tools"):
+            data = self.llm.run_tools(EDITOR_SYSTEM + AGENT_TOOLS_NOTE, prompt, self._tools(candidates, seen),
+                                      stage="editor", schema=EDITOR_SCHEMA, max_turns=4)
+        else:
+            data = self.llm.json(EDITOR_SYSTEM, prompt, stage="editor", schema=EDITOR_SCHEMA)
+        picks = LLMEditor.to_stories(data, candidates, n)
+        for round_no in range(1, self.max_repairs + 1):
+            issues = fatal(check_picks(picks, candidates, n, seen.urls, seen.recent_headlines(SeenStore.KEEP_DAYS),
+                                       self.max_age_hours))
+            if not issues:
+                break
+            log.info("      editor repair round %d: %s", round_no, "; ".join(i.detail for i in issues))
+            rows = [{"headline": s.headline, "url": s.url, "key_fact": s.key_fact, "summary": s.summary,
+                     "outlets": s.outlets} for s in picks]
+            repair = REPAIR_PROMPT.format(picks=json.dumps(rows, indent=1), n=n,
+                                          problems="\n".join(i.line() for i in issues))
+            try:
+                data = self.llm.json(EDITOR_SYSTEM, prompt + repair, stage=f"editor-repair-{round_no}",
+                                     schema=EDITOR_SCHEMA)
+            except BudgetExceeded as exc:
+                log.warning("      %s", exc)
+                break
+            picks = LLMEditor.to_stories(data, candidates, n) or picks
+        return picks
+
+
+def build_editor(llm: LLM | None, max_age_hours: float, agents: bool = False, max_repairs: int = 2) -> Editor:
+    if not llm:
+        return HeuristicEditor(max_age_hours)
+    return AgentEditor(llm, max_age_hours, max_repairs) if agents else LLMEditor(llm, max_age_hours)
+
+
+def settle(picks: list[Story], candidates: list[Story], n: int, seen: SeenStore,
+           max_age_hours: float) -> list[Story]:
+    """Keep picks in order while they pass the checks, up to n.
+
+    A link that isn't in today's material is dropped (the story stays); duplicates, repeats,
+    stale and sample stories are dropped.
+    """
+    kept: list[Story] = []
+    aired = seen.recent_headlines(SeenStore.KEEP_DAYS)
+    for s in picks:
+        if len(kept) == n:
+            break
+        issues = [i for i in check_picks(kept + [s], candidates, n, seen.urls, aired, max_age_hours)
+                  if i.index == len(kept) and i.fatal]
+        if any(i.code == "url_not_in_sources" for i in issues):
+            log.warning("      dropping made-up link %s for %r", s.url, s.headline or s.title)
+            s.url = ""
+            issues = [i for i in issues if i.code != "url_not_in_sources"]
+        if issues:
+            log.warning("      dropping %r: %s", s.headline or s.title, "; ".join(i.detail for i in issues))
+            continue
+        kept.append(s)
+    return kept
 
 
 def pick_with_fallback(editor: Editor, candidates: list[Story], n: int, seen: SeenStore,
                        max_age_hours: float) -> list[Story]:
-    if isinstance(editor, HeuristicEditor):
-        return editor.pick(candidates, n, seen)
+    """The editor's picks, checked, then topped up from the keyword ranking if any were dropped."""
+    picked: list[Story] = []
     try:
         picked = editor.pick(candidates, n, seen)
-        if picked:
-            return picked
-        log.warning("%s editor picked nothing; falling back to heuristic", editor.name)
     except Exception as exc:
         log.warning("%s editor failed (%s); falling back to heuristic", editor.name, exc)
-    return HeuristicEditor(max_age_hours).pick(candidates, n, seen)
+    pool = HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen)
+    kept = settle(picked, candidates, n, seen, max_age_hours)
+    if len(kept) < n:
+        if picked and not isinstance(editor, HeuristicEditor):
+            log.warning("%s editor gave %d usable stories of %d; topping up from the keyword ranking",
+                        editor.name, len(kept), n)
+        kept = settle(kept + [s for s in pool if s not in kept], candidates, n, seen, max_age_hours)
+    return kept

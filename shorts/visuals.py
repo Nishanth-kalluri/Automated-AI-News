@@ -58,17 +58,55 @@ def _gradient() -> Image.Image:
     return img
 
 
+def fit_line(text: str, f: ImageFont.ImageFont, max_w: float) -> str:
+    """The text, cut at a word boundary with an ellipsis if it is wider than ``max_w`` pixels."""
+    if f.getlength(text) <= max_w:
+        return text
+    words = text.split()
+    while len(words) > 1 and f.getlength(" ".join(words) + "…") > max_w:
+        words.pop()
+    line = " ".join(words)
+    while line and f.getlength(line + "…") > max_w:  # a single very long word
+        line = line[:-1]
+    return line.rstrip(" ,;:") + "…"
+
+
+def _wrap(d: ImageDraw.ImageDraw, text: str, f: ImageFont.ImageFont, max_w: int) -> str:
+    width_chars = max(8, int(max_w / (f.size * 0.56)))
+    return textwrap.fill(text, width=width_chars)
+
+
+def _fits(d: ImageDraw.ImageDraw, wrapped: str, f: ImageFont.ImageFont, max_w: int, max_h: int) -> bool:
+    box = d.multiline_textbbox((0, 0), wrapped, font=f, spacing=f.size // 4)
+    return box[2] - box[0] <= max_w and box[3] - box[1] <= max_h
+
+
 def _fit(d: ImageDraw.ImageDraw, text: str, max_w: int, max_h: int, sizes: range) -> tuple[str, ImageFont.ImageFont]:
-    """Largest font size at which the wrapped text fits the box."""
+    """Largest font size at which the wrapped text fits the box; at the smallest size, drop words."""
     for size in sizes:
         f = font(size)
-        width_chars = max(8, int(max_w / (size * 0.56)))
-        wrapped = textwrap.fill(text, width=width_chars)
-        box = d.multiline_textbbox((0, 0), wrapped, font=f, spacing=size // 4)
-        if box[2] - box[0] <= max_w and box[3] - box[1] <= max_h:
+        wrapped = _wrap(d, text, f, max_w)
+        if _fits(d, wrapped, f, max_w, max_h):
             return wrapped, f
-    f = font(sizes[-1])
-    return textwrap.shorten(text, 90, placeholder="…"), f
+    words = text.split()
+    while len(words) > 1:
+        words.pop()
+        wrapped = _wrap(d, " ".join(words) + "…", f, max_w)
+        if _fits(d, wrapped, f, max_w, max_h):
+            return wrapped, f
+    return fit_line(text, f, max_w), f
+
+
+CHIP_TEXT_MAX_W = CARD[2] - 50 - (CARD[0] + 90)  # the chip must end inside the card's right padding
+
+
+def chip_text(key_fact: str) -> tuple[ImageFont.ImageFont, str]:
+    """Font and text for the key-fact chip: shrink to fit first, then shorten."""
+    for size in range(40, 29, -2):
+        f = font(size)
+        if f.getlength(key_fact) <= CHIP_TEXT_MAX_W:
+            return f, key_fact
+    return f, fit_line(key_fact, f, CHIP_TEXT_MAX_W)
 
 
 class StoryCards:
@@ -100,13 +138,13 @@ class StoryCards:
         d.multiline_text((l + 50, t + 120), text, font=f, fill=INK, spacing=f.size // 4)
         y = b - 170
         if seg.key_fact:
-            chip_font = font(40)
-            fact = textwrap.shorten(seg.key_fact, 42, placeholder="…")
-            box = d.textbbox((0, 0), fact, font=chip_font)
-            d.rounded_rectangle([l + 50, y, l + 90 + box[2], y + 70], radius=35, fill=ORANGE)
+            chip_font, fact = chip_text(seg.key_fact)
+            width = chip_font.getlength(fact)
+            d.rounded_rectangle([l + 50, y, l + 90 + width, y + 70], radius=35, fill=ORANGE)
             d.text((l + 70, y + 35), fact, font=chip_font, fill=(255, 255, 255), anchor="lm")
         if seg.source:
-            d.text((l + 50, b - 56), f"via {seg.source}"[:60], font=font(32, bold=False), fill=MUTED)
+            via_font = font(32, bold=False)
+            d.text((l + 50, b - 56), fit_line(f"via {seg.source}", via_font, r - l - 100), font=via_font, fill=MUTED)
         return img
 
     def _intro(self, episode: Episode) -> Image.Image:
@@ -116,10 +154,11 @@ class StoryCards:
         d.rounded_rectangle(CARD, radius=36, fill=PAPER)
         d.text((l + 50, t + 44), "TODAY IN AI", font=font(40), fill=ORANGE)
         y = t + 120
+        line_font = font(38)
         for i, seg in enumerate(episode.story_segments, 1):
-            line = textwrap.shorten(seg.headline, 38, placeholder="…")
+            line = fit_line(seg.headline, line_font, r - 50 - (l + 110))
             d.text((l + 50, y), f"{i}", font=font(40), fill=ORANGE)
-            d.text((l + 110, y), line, font=font(38), fill=INK)
+            d.text((l + 110, y), line, font=line_font, fill=INK)
             y += 62
         return img
 

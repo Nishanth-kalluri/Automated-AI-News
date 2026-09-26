@@ -1,6 +1,6 @@
 [project]
 name = "ai-shorts"
-version = "0.2.0"
+version = "0.3.0"
 description = "Turn the latest AI news into YouTube Shorts, end to end."
 requires-python = ">=3.10"
 dependencies = [
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-llm = ["openai>=1.50", "anthropic>=0.40"]
+llm = ["openai>=3,<4", "anthropic>=0.40"]
 tts = ["edge-tts>=6.1"]
 youtube = ["google-api-python-client>=2.100", "google-auth-oauthlib>=1.1"]
 all = ["ai-shorts[llm,tts,youtube]"]

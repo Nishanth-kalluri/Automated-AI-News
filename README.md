@@ -11,7 +11,26 @@ sources.py    selection   research.py     writer.py        voice.py  character.p
 
 Every stage is a small interface with a factory that picks the implementation from
 config, and every stage that needs a key or the network falls back to a free or offline
-default, so a run always finishes.
+default, so a run always finishes when there is real news to report.
+
+With an LLM key, the two judgement stages run as agents (`SHORTS_AGENTS=on`, the default):
+
+- **Editor agent** (`selection.py`) can search the day's candidates and the list of stories
+  that already aired while it picks. Its picks are then checked in code (`checks.py`): no
+  duplicates, no repeats, only links that appear in the sources, nothing too old. Problems go
+  back to it for up to `SHORTS_MAX_REPAIRS` rounds; picks that still fail are dropped and
+  replaced from the keyword-scored pool.
+- **Writer agent** (`writer.py`) drafts the script, then a critic model checks every claim
+  against the story material while code checks length, hype words, links in the narration
+  and numbers that aren't in the sources. Only the failing segments are rewritten; any that
+  still fail get the template line for that story, not a whole-script fallback.
+
+Every LLM call is priced and logged in `cost.json`. A run stops calling the LLM at
+`SHORTS_BUDGET_USD` (default $0.60) and the month at `SHORTS_MONTHLY_BUDGET_USD` (default $18,
+kept in `state/spend.json`); stages then use their no-key fallbacks.
+
+A run fails instead of uploading when every news source is down, when there aren't enough
+fresh stories, when the voice left a segment silent, or when a sample story slipped in.
 
 ## Quick start
 
@@ -30,24 +49,24 @@ Each run writes `output/<timestamp>/`:
 
 | File | What it is |
 |------|------------|
-| `01-candidates.json` | everything gathered: newsletter issues, feed and forum headlines |
+| `01-candidates.json` | everything gathered: newsletter issues, feed and forum headlines (`.full.json` keeps the text) |
 | `02-picks.json` | the 8 stories the editor chose, with outlets, key fact and article text |
 | `03-episode.json` | the script: intro, one segment per story, outro, title, description |
 | `audio/` | one voice clip per segment and the joined `voice.wav` |
 | `host/`, `cards/` | duck sprites and per-segment backgrounds |
 | `timeline.json`, `captions.ass` | what the renderer draws, and when |
 | `short.mp4` | the 1080x1920 video |
-| `qa.json`, `cost.json`, `upload.json` | checks, token usage, YouTube metadata |
+| `qa.json`, `cost.json`, `upload.json` | checks, LLM calls and dollars spent, YouTube metadata |
 
 ## Stages and how to swap them
 
 | Stage | Default | Needs | Fallback | Upgrade path |
 |-------|---------|-------|----------|--------------|
-| News | Newsletter inbox (AgentMail), RSS, Hacker News, Reddit | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX` | feeds only, then sample stories | more feeds, X lists |
-| Pick | LLM reads newsletters + headlines, merges duplicates, picks 8 | `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) | keyword + freshness scoring | embeddings, analytics feedback |
+| News | Newsletter inbox (AgentMail), RSS, Hacker News, Reddit (RSS) | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX` | feeds only; the run fails if nothing arrives | more feeds, X lists |
+| Pick | editor agent with search tools and checked picks (`SHORTS_EDITOR_MODEL`) | `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) | keyword + freshness scoring | web search, analytics feedback |
 | Read | Tavily extracts the full article for each pick | `TAVILY_API_KEY` | newsletter summary only | |
-| Script | LLM, persona in `shorts/persona.md` | LLM key | template from headlines | separate fact-check pass |
-| Voice | edge-tts `en-US-AnaNeural` (free) | internet | silence, same pacing | ElevenLabs designed voice |
+| Script | writer agent + critic (`SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL`), persona in `shorts/persona.md` | LLM key | template line per failing segment | LangGraph newsroom with approval |
+| Voice | edge-tts `en-US-AnaNeural` (free); script trimmed if the audio runs past 170 s | internet | silence, which fails QA | ElevenLabs designed voice |
 | Host | puppet duck, bill moves with the voice loudness | – | – | Kling AI Avatar (`SHORTS_ANIMATOR`) |
 | Render | cards + duck + desk + karaoke captions, one ffmpeg call | – | – | Remotion |
 | Upload | `local` (metadata only) or `youtube` (private, marked synthetic) | YouTube OAuth secrets | – | public after API audit |
@@ -58,9 +77,9 @@ module's `build_*` function.
 
 ## Running daily on GitHub Actions
 
-`.github/workflows/daily-short.yml` runs at 13:00 UTC and can be started by hand from the
-Actions tab. It keeps the list of already-aired stories on a `state` branch and saves the
-video and JSON files as a workflow artifact.
+`.github/workflows/daily-short.yml` runs at 12:47 UTC and can be started by hand from the
+Actions tab. It keeps the list of already-aired stories and the month's LLM spend on a `state`
+branch and saves the video and JSON files as a workflow artifact.
 
 In the repository settings, under **Secrets and variables → Actions**, add:
 
@@ -71,7 +90,10 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `TAVILY_API_KEY` | secret | Tavily key |
 | `AGENTMAIL_INBOX` | variable | `agentnews247@agentmail.to` |
 | `SHORTS_NOTIFY_EMAIL` | variable | where the "episode ready" email goes |
-| `SHORTS_LLM_MODEL` | variable | optional, overrides `gpt-5` |
+| `SHORTS_LLM_MODEL` | variable | optional; one model for every role (default: editor and writer `gpt-6-sol`, checker `gpt-6-luna`, `gpt-5` if those aren't available) |
+| `SHORTS_EDITOR_MODEL`, `SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL` | variables | optional, one role's model |
+| `SHORTS_AGENTS` | variable | optional, `off` for one-shot LLM calls |
+| `SHORTS_BUDGET_USD`, `SHORTS_MONTHLY_BUDGET_USD` | variables | optional, default `0.60` and `18` |
 | `SHORTS_UPLOADER` | variable | `youtube` once the YouTube secrets are in |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |
 

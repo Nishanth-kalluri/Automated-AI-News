@@ -2,7 +2,7 @@ name: Daily AI Short
 
 on:
   schedule:
-    - cron: "0 13 * * *"  # 13:00 UTC every day
+    - cron: "47 12 * * *"  # 12:47 UTC every day; off the hour, when GitHub delays scheduled runs
   workflow_dispatch:
     inputs:
       upload:
@@ -11,7 +11,7 @@ on:
         default: true
 
 permissions:
-  contents: write  # to save state (already-aired stories) on the `state` branch
+  contents: write  # to save state (already-aired stories, monthly LLM spend) on the `state` branch
 
 concurrency:
   group: daily-short
@@ -20,7 +20,7 @@ concurrency:
 jobs:
   make-short:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,7 +29,7 @@ jobs:
       - run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
       - run: pip install ".[all]"
 
-      # Stories that already aired live on the `state` branch so videos don't repeat.
+      # Stories that already aired and the month's LLM spend live on the `state` branch.
       - name: Load state
         run: |
           mkdir -p state
@@ -45,6 +45,12 @@ jobs:
           AGENTMAIL_INBOX: ${{ vars.AGENTMAIL_INBOX }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           SHORTS_LLM_MODEL: ${{ vars.SHORTS_LLM_MODEL }}
+          SHORTS_EDITOR_MODEL: ${{ vars.SHORTS_EDITOR_MODEL }}
+          SHORTS_WRITER_MODEL: ${{ vars.SHORTS_WRITER_MODEL }}
+          SHORTS_CHECKER_MODEL: ${{ vars.SHORTS_CHECKER_MODEL }}
+          SHORTS_AGENTS: ${{ vars.SHORTS_AGENTS }}
+          SHORTS_BUDGET_USD: ${{ vars.SHORTS_BUDGET_USD }}
+          SHORTS_MONTHLY_BUDGET_USD: ${{ vars.SHORTS_MONTHLY_BUDGET_USD }}
           SHORTS_NOTIFY_EMAIL: ${{ vars.SHORTS_NOTIFY_EMAIL }}
           SHORTS_UPLOADER: ${{ vars.SHORTS_UPLOADER || 'local' }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
@@ -54,8 +60,10 @@ jobs:
         run: python -m shorts run $([ "$UPLOAD" = "true" ] && echo --upload)
 
       - name: Save state
+        if: always()  # a failed run still spent money; the monthly cap must count it
         run: |
           cd state
+          [ -n "$(ls -A)" ] || exit 0
           git init -q -b state
           git add -A
           git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
