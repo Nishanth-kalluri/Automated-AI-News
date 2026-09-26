@@ -82,9 +82,10 @@ Return an empty list for a segment with no problems."""
 
 CRITIC_EVIDENCE_NOTE = """
 Some stories list Evidence (verbatim quotes from the sources) and a First reported date. For those, check the
-segment, headline and key fact against the Evidence first: a claim is supported only if the Evidence or the
-Summary states it, and where they disagree the Evidence wins. "Today", "yesterday" or "this week" in conflict
-with the First reported date is unsupported. Check stories without Evidence as before."""
+segment, headline and key fact against the Evidence first: a claim is supported only if the Evidence, the
+Summary or the Article text (when given) states it, and where they disagree the Evidence wins. "Today",
+"yesterday" or "this week" in conflict with the First reported date is unsupported. Check stories without
+Evidence as before."""
 
 REVISE_PROMPT = """Here is today's script and the story material. Fix only the problems listed below.
 
@@ -112,8 +113,8 @@ class ScriptWriter(Protocol):
 
 
 def _story_block(stories: list[Story]) -> str:
-    """The story material the writer and the critic both see. A researched story shows its
-    checked quotes instead of the article text."""
+    """The story material the writer and the critic both see. A researched story with at least two
+    checked quotes shows them instead of the article text; with fewer, it shows both."""
     out = []
     for i, s in enumerate(stories, 1):
         part = f"STORY {i}: {s.headline or s.title}\nCovered by: {', '.join(s.outlets or [s.source])}\n"
@@ -124,7 +125,7 @@ def _story_block(stories: list[Story]) -> str:
             part += "Evidence (verbatim quotes from the sources):\n" + "".join(
                 f'[E{k}] "{e.quote}" ({(urlsplit(e.url).hostname or "source").removeprefix("www.")})\n'
                 for k, e in enumerate(s.evidence, 1))
-        elif s.body:
+        if s.body and len(s.evidence) < 2:
             part += f"Article text:\n{s.body}\n"
         out.append(part)
     return "\n".join(out)
@@ -256,12 +257,14 @@ class CriticWriter:
     def write(self, stories: list[Story]) -> Episode:
         self.report = {"rounds": [], "fallbacks": [], "critic_errors": 0}
         episode = assemble(self.base.draft(stories), stories, strict=False)
-        issues: list[Issue] = []
+        critic: list[Issue] = []
         for round_no in range(self.max_repairs + 1):
             issues = lint_episode(episode, stories, self.frame())
             rules = len(fatal(issues))
+            critic = []
             try:
-                issues += self.review(episode, stories)
+                critic = self.review(episode, stories)
+                issues += critic
             except BudgetExceeded as exc:
                 log.warning("      %s", exc)
                 self.report["critic_errors"] += 1
@@ -282,8 +285,7 @@ class CriticWriter:
             except Exception as exc:
                 log.warning("      rewrite failed (%s)", exc)
                 break
-        return self.settle(episode, stories, fatal(lint_episode(episode, stories, self.frame())) + [
-            i for i in fatal(issues) if i.code in ("unsupported_claim", "intro_problem", "outro_problem")])
+        return self.settle(episode, stories, fatal(lint_episode(episode, stories, self.frame())) + fatal(critic))
 
     def frame(self) -> str:
         """What the intro and outro may mention besides the stories."""
@@ -328,7 +330,13 @@ class CriticWriter:
     def settle(self, episode: Episode, stories: list[Story], remaining: list[Issue]) -> Episode:
         """Last resort for problems the rewrites didn't fix: template text or a trim, segment by segment."""
         segments = list(episode.segments)
+        replaced: set[int] = set()  # positions already swapped for template text
         for issue in remaining:
+            pos = _segment_position(issue)
+            if pos is not None and pos in replaced:
+                continue
+            if issue.code != "too_long" and pos is not None:
+                replaced.add(pos)
             if issue.code in ("missing_intro", "intro_problem"):
                 log.warning("      the intro still has a problem (%s); using the standard intro", issue.detail)
                 segments[0] = self.template.intro(len(stories))

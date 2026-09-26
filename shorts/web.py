@@ -85,7 +85,7 @@ class TavilyCredits:
         if path and path.exists():
             try:
                 self.months = {k: int(v) for k, v in json.loads(path.read_text()).items()}
-            except (ValueError, TypeError, AttributeError) as exc:
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
                 log.warning("tavily: can't read %s (%s); counting from 0", path, exc)
         self.run_used = 0
         self.allowance: float = math.inf

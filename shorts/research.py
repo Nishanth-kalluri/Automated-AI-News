@@ -135,7 +135,7 @@ class NoResearch:
 class Finding:
     status: str = "failed"
     evidence: list[Evidence] = field(default_factory=list)
-    dropped: int = 0  # quotes the model gave that no fetched page contains
+    dropped: int = 0  # quotes the model gave that no fetched page (or only an off-topic one) contains
     first_reported: str = ""
     url: str = ""  # a better source it read, with its text
     body: str = ""
@@ -452,16 +452,18 @@ def swap_failing(researcher: Researcher, stories: list[Story], bench: list[Story
                      key=lambda i: RANK[stories[i].checked])[:max_swaps]
     if not failing:
         return stories
-    chosen: dict[int, Story] = {}
+    chosen: dict[int, Story] = {}  # slot -> a researched copy of the bench story
+    used: list[Story] = []  # bench stories already taken, so each fills one slot at most
     for i in failing:
         others = [s for j, s in enumerate(stories) if j != i and j not in chosen] + list(chosen.values())
         for alt in bench:
-            if any(alt is c for c in chosen.values()) or any(alt is s for s in stories):
+            if any(alt is u for u in used) or any(alt is s for s in stories):
                 continue
             trial = copy.deepcopy(alt)
             # Copies of the kept picks: settle drops links it doesn't know, like a researcher's source.
             if any(x is trial for x in settle_fn([copy.copy(o) for o in others] + [trial])):
                 chosen[i] = trial
+                used.append(alt)
                 break
     if chosen:
         research(researcher, list(chosen.values()))

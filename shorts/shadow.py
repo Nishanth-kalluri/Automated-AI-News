@@ -149,7 +149,7 @@ def cross_check(live: RunRecord, shadow: RunRecord, pairs: list[tuple[Story, Sto
 
 def _cost(rec: RunRecord) -> dict:
     usage = rec.usage
-    return {"usd": round(usage.total_usd, 4) if usage else 0.0, "llm_calls": usage.calls if usage else 0,
+    return {"usd": round(usage.total_usd, 4) if usage else 0.0, "llm_calls": len(usage.calls) if usage else 0,
             "tavily_credits": rec.tavily_credits}
 
 
