@@ -53,11 +53,10 @@ def run(cfg: Config, *, upload: bool = False) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     ledger = SpendLedger(cfg.state_dir / "spend.json")
     usage = Usage(run_cap_usd=cfg.budget_usd, month_cap_usd=cfg.monthly_budget_usd,
-                  month_spent_usd=ledger.this_month())
+                  month_spent_usd=ledger.this_month(), on_add=ledger.add)  # saved call by call
     try:
         return _run(cfg, run_dir, usage, upload)
-    finally:  # record what was spent even when the run fails
-        ledger.add(usage.total_usd)
+    finally:
         _dump(run_dir / "cost.json", {"usd": round(usage.total_usd, 4), "run_cap_usd": cfg.budget_usd,
                                       "month_usd": round(ledger.this_month(), 4),
                                       "month_cap_usd": cfg.monthly_budget_usd, "llm_calls": usage.calls})

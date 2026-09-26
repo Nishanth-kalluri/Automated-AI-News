@@ -33,8 +33,9 @@ PRICES = {
     "gpt-5": (1.25, 0.125, 10.00),
     "gpt-5-mini": (0.25, 0.025, 2.00),
 }
-UNKNOWN_PRICE = (5.00, 0.50, 25.00)
-PRO_PRICE = (15.00, 1.50, 120.00)  # "pro" tiers cost far more than their base model
+UNKNOWN_PRICE = (10.00, 1.00, 50.00)  # the top of the regular tiers
+PRO_PRICE = (150.00, 15.00, 600.00)  # "pro" tiers cost many times their base model
+_warned_prices: set[str] = set()
 TOOL_OUTPUT_MAX_CHARS = 8000
 
 
@@ -46,7 +47,12 @@ def price(model: str) -> tuple[float, float, float]:
     for name, p in PRICES.items():
         if model == name or re.fullmatch(re.escape(name) + r"-\d{4}-\d{2}-\d{2}", model):
             return p
-    return PRO_PRICE if re.search(r"-pro\b", model) else UNKNOWN_PRICE
+    fallback = PRO_PRICE if re.search(r"-pro\b", model) else UNKNOWN_PRICE
+    if model not in _warned_prices:
+        _warned_prices.add(model)
+        log.warning("no price listed for %s; counting it at $%g/$%g per 1M tokens against the caps", model,
+                    fallback[0], fallback[2])
+    return fallback
 
 
 @dataclass
@@ -57,12 +63,16 @@ class Usage:
     run_cap_usd: float = float("inf")
     month_cap_usd: float = float("inf")
     month_spent_usd: float = 0.0  # spent by earlier runs this month
+    # Called with each call's dollars as it happens, so the ledger is saved even if the run is killed.
+    on_add: Callable[[float], None] | None = field(default=None, repr=False, compare=False)
 
     def add(self, stage: str, model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> None:
         p_in, p_cached, p_out = price(model)
         usd = ((input_tokens - cached_tokens) * p_in + cached_tokens * p_cached + output_tokens * p_out) / 1e6
         self.calls.append({"stage": stage, "model": model, "input_tokens": input_tokens,
                            "cached_tokens": cached_tokens, "output_tokens": output_tokens, "usd": round(usd, 5)})
+        if self.on_add:
+            self.on_add(usd)
 
     @property
     def total_usd(self) -> float:

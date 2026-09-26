@@ -24,9 +24,10 @@ TITLE_MAX = 91  # the uploader appends " #Shorts" and YouTube allows 100 charact
 
 _URL_RE = re.compile(r"https?://[^\s)>\]\"'<]+")
 # A number as written, with an optional scale word: "93.4", "1,500,000", "$1.49 billion", "40k".
-_NUM_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?:\s*(thousand|million|billion|trillion|bn|[kmb])\b)?", re.I)
+_NUM_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?:\s*(thousand|million|billion|trillion|bn|tn|[kmbt])\b)?",
+                     re.I)
 _SCALES = {"thousand": 1e3, "k": 1e3, "million": 1e6, "m": 1e6, "billion": 1e9, "bn": 1e9, "b": 1e9,
-           "trillion": 1e12}
+           "trillion": 1e12, "tn": 1e12, "t": 1e12}
 _NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
                  "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "dozen": 12, "fifteen": 15, "twenty": 20,
                  "thirty": 30, "forty": 40, "fifty": 50, "hundred": 100, "half": 0.5, "double": 2, "twice": 2,
@@ -39,7 +40,9 @@ made launch launches launched unveil unveils unveiled release releases released 
 ship ships shipped introduce introduces introduced debut debuts roll rolls rolled out rolling raise raises raised
 open opens opened build builds built model models tool tools feature features update updates version company
 startup lab labs report reports study billion million thousand dollar dollars percent funding round first big
-major latest today week again also here plus""".split())
+major latest today week again also here plus up bring brings brought sign signs signed hire hires hired acquire
+acquires acquired buy buys bought invest invests invested partner partners partnered""".split())
+_EVENT_NUMBER_RE = re.compile(r"(\d+(?:\.\d+)?)(?:bn|tn|[kmbt])?")
 
 
 @dataclass
@@ -76,12 +79,23 @@ def norm_url(url: str) -> str:
 
 
 def _event_words(text: str) -> set[str]:
-    """The words that identify an event: names, products, numbers. "GPT-6" and "4.1" stay whole."""
+    """The words that identify an event: names, products, numbers.
+
+    Numbers are compared by value, however they are written: "GPT-5" and "GPT 5" give "5",
+    "$100B" and "$100 billion" give "100", "Gemini 3.0" gives "3".
+    """
+    text = re.sub(r"[\u2010-\u2015\u2212]", "-", (text or "").lower())  # typographic hyphens
+    text = re.sub(r"(?<=\d),(?=\d{3})", "", text)
     words = set()
-    for w in re.findall(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", (text or "").lower()):
-        if w in _FILLER or (len(w) < 2 and not w.isdigit()):
+    for w in re.findall(r"\d+(?:\.\d+)?[a-z]*|[a-z][a-z0-9]*", text):
+        number = _EVENT_NUMBER_RE.fullmatch(w)
+        if number:
+            w = f"{float(number.group(1)):g}"
+        elif w in _FILLER or len(w) < 2:
             continue
-        words.add(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w)
+        else:
+            w = w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+        words.add(w)
     return words - _FILLER
 
 
@@ -94,19 +108,24 @@ def similar(a: str, b: str) -> float:
 def same_event(a: str, b: str) -> bool:
     """Whether two headlines are about the same event.
 
-    Headlines follow a few patterns ("X unveils Y", "X raises N dollars"), so they are compared on
-    their event words only, and two headlines with different numbers are different events:
-    "Nvidia unveils new AI chip" and "AMD unveils new AI chip" are not the same story.
+    Headlines follow a few patterns ("X unveils Y", "X signs a deal with Y"), so they are compared on
+    their event words only. Two headlines with different numbers are different events, and so are
+    two that differ in the thing that happened: "Nvidia unveils new AI chip" and "AMD unveils new
+    AI chip", or "OpenAI signs chip deal with AMD" and "OpenAI signs chip deal with Broadcom".
     """
     wa, wb = _event_words(a), _event_words(b)
-    nums_a = {w for w in wa if any(ch.isdigit() for ch in w)}
-    nums_b = {w for w in wb if any(ch.isdigit() for ch in w)}
+    nums_a = {w for w in wa if w[0].isdigit()}
+    nums_b = {w for w in wb if w[0].isdigit()}
     if nums_a and nums_b and not nums_a & nums_b:
         return False
     shared = wa & wb
-    if wa and wa == wb:  # short headlines like "OpenAI model launch" and "OpenAI model launch again"
+    if len(shared) < 2:  # short headlines like "OpenAI model launch" and "OpenAI model launch again"
+        return bool(wa) and wa == wb
+    if shared in (wa, wb) or len(shared) / len(wa | wb) >= 0.75:
         return True
-    return len(shared) >= 2 and (len(shared) / len(wa | wb) >= 0.5 or len(shared) / min(len(wa), len(wb)) >= 0.75)
+    # "Anthropic raises $13B at $183B valuation" / "Anthropic raises $13 billion Series F, valued at $183 billion"
+    same_amount = any(w[0].isdigit() and float(w) >= 10 for w in shared)
+    return same_amount and len(shared) / min(len(wa), len(wb)) >= 0.75
 
 
 def source_urls(candidates: list[Story]) -> set[str]:
@@ -169,19 +188,26 @@ def _numbers(text: str) -> list[tuple[str, float, int]]:
     return found
 
 
+def _decimal_points(text: str) -> str:
+    return re.sub(r"\b(\d+) point (\d+)\b", r"\1.\2", text or "")
+
+
 def _material_values(text: str) -> set[float]:
-    """Numbers a script may use: each number with and without its scale, the parts of a decimal
-    ("GPT-4.1" -> 4.1, 4, 1) and small numbers written as words."""
+    """Numbers a script may use: each number with and without its scale, and numbers written as
+    words ("three models", "a million-token context", "one billion users")."""
     values: set[float] = set()
-    for m in _NUM_RE.finditer(text or ""):
+    for m in _NUM_RE.finditer(_decimal_points(text)):
         digits = m.group(1).replace(",", "").rstrip(".")
         try:
             values.add(float(digits))
             values.add(float(digits) * _SCALES.get((m.group(2) or "").lower(), 1))
-            values.update(float(part) for part in digits.split(".") if part)
         except ValueError:
             continue
-    values.update(v for w, v in _NUMBER_WORDS.items() if re.search(rf"\b{w}\b", (text or "").lower()))
+    low = (text or "").lower()
+    values.update(v for w, v in _NUMBER_WORDS.items() if re.search(rf"\b{w}\b", low))
+    words = "|".join(["an?", *_NUMBER_WORDS])
+    for word, scale in re.findall(rf"\b({words})[\s-]+(thousand|million|billion|trillion)\b", low):
+        values.add(_NUMBER_WORDS.get(word, 1) * _SCALES[scale])
     return values
 
 
@@ -199,14 +225,17 @@ def _supported(value: float, decimals: int, material: set[float]) -> bool:
             continue  # looks like a year: exact only
         if any(math.isclose(value, _round_sig(m, d), rel_tol=1e-9) for d in (2, 3)):
             return True
-        if math.isclose(value, round(m, decimals), rel_tol=1e-9) and abs(m) >= 1:
+        # Rounding to whole numbers only from 10 up: "Claude 5" is not a rounding of "Claude 4.5".
+        if abs(m) >= 10 and math.isclose(value, round(m, decimals), rel_tol=1e-9):
             return True
     return False
 
 
 def unsupported_numbers(text: str, material: str) -> list[str]:
+    """Numbers in ``text`` the material doesn't back, as written. "4 point 1" reads as 4.1."""
     values = _material_values(material)
-    return sorted({written for written, value, decimals in _numbers(text) if not _supported(value, decimals, values)})
+    return sorted({written for written, value, decimals in _numbers(_decimal_points(text))
+                   if not _supported(value, decimals, values)})
 
 
 def predicted_seconds(episode: Episode) -> float:
@@ -217,6 +246,11 @@ def predicted_seconds(episode: Episode) -> float:
 def _material(story: Story) -> str:
     return " ".join([story.title, story.headline, story.summary, story.body, story.key_fact, story.source,
                      *story.outlets])
+
+
+def episode_material(stories: list[Story], frame: str = "") -> str:
+    """Everything the intro, outro and title may draw on: every story, the story count, the frame."""
+    return " ".join(_material(s) for s in stories) + f" {len(stories)} {max(len(stories) - 1, 0)} {frame}"
 
 
 def _speech_problems(text: str) -> list[str]:
@@ -230,8 +264,11 @@ def _speech_problems(text: str) -> list[str]:
     return problems
 
 
-def lint_episode(episode: Episode, stories: list[Story]) -> list[Issue]:
-    """Script rules the writer is told about, checked in code rather than trusted."""
+def lint_episode(episode: Episode, stories: list[Story], frame: str = "") -> list[Issue]:
+    """Script rules the writer is told about, checked in code rather than trusted.
+
+    ``frame`` is what else the intro and outro may mention: the show, the host and today's date.
+    """
     issues: list[Issue] = []
     kinds = [s.kind for s in episode.segments]
     if "intro" not in kinds or not episode.segments[0].text.strip():
@@ -241,7 +278,7 @@ def lint_episode(episode: Episode, stories: list[Story]) -> list[Issue]:
     segs = episode.story_segments
     if len(segs) != len(stories):
         issues.append(Issue("segment_count", f"{len(segs)} story segments for {len(stories)} stories"))
-    everything = " ".join(_material(s) for s in stories) + f" {len(stories)} {max(len(stories) - 1, 0)}"
+    everything = episode_material(stories, frame)
     for code, where, seg in (("intro_problem", "the intro", episode.segments[0]),
                              ("outro_problem", "the outro", episode.segments[-1])):
         if seg.kind not in ("intro", "outro") or not seg.text.strip():
@@ -265,7 +302,7 @@ def lint_episode(episode: Episode, stories: list[Story]) -> list[Issue]:
             issues.append(Issue("hype", f"uses hype words ({', '.join(hype)})", i))
         if _URL_RE.search(seg.text) or re.search(r"\bwww\.", lowered):
             issues.append(Issue("url_in_narration", "reads out a web address", i))
-        missing = unsupported_numbers(f"{seg.text}\n{seg.key_fact}", _material(story))
+        missing = unsupported_numbers(f"{seg.text}\n{seg.key_fact}\n{seg.headline}", _material(story))
         if missing:
             issues.append(Issue("unsupported_number",
                                 f"uses {', '.join(missing)}, which is not in the story material", i))

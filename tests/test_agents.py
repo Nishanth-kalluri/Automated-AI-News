@@ -98,8 +98,23 @@ def test_same_event_compares_names_and_numbers_not_headline_shape():
     assert not same_event("Anthropic raises 10 billion dollars", "OpenAI raises 40 billion dollars")
     assert same_event("OpenAI launches GPT-6 Sol", "OpenAI releases GPT-6 Sol model")
     assert same_event("Meta releases Llama 5", "Meta's Llama 5 is out")
-    picks = [_story("Nvidia unveils new AI chip"), _story("AMD unveils new AI chip")]
-    assert not [i for i in check_picks(picks, picks, 2, set(), ["OpenAI raises 40 billion dollars"], 30) if i.fatal]
+    # the same number written differently is the same number
+    assert same_event("Nvidia invests $100 billion in OpenAI", "Nvidia to invest up to $100B in OpenAI as part of deal")
+    assert same_event("OpenAI launches GPT-5", "OpenAI launches GPT 5")
+    assert same_event("Google releases Gemini 3", "Google launches Gemini 3.0")
+    assert same_event("OpenAI launches GPT\u20116", "OpenAI launches GPT-6")  # typographic hyphen
+    assert same_event("Anthropic raises $13B at $183B valuation",
+                      "Anthropic raises $13 billion Series F, now valued at $183 billion")
+    # a different partner, product or place is a different story
+    assert not same_event("OpenAI signs chip deal with AMD", "OpenAI signs chip deal with Broadcom")
+    assert not same_event("Google launches Gemini 3 Pro", "Google launches Gemini 3 Deep Think")
+    assert not same_event("Anthropic opens office in Seoul", "Anthropic opens office in Tokyo")
+    assert not same_event("Anthropic releases Claude Haiku 4.5", "Anthropic releases Claude Sonnet 4.5")
+    picks = [_story("Nvidia unveils new AI chip"), _story("AMD unveils new AI chip"),
+             _story("Anthropic raises 10 billion dollars"), _story("xAI raises $20B in Series E")]
+    aired = ["OpenAI raises 40 billion dollars", "xAI raises $20 billion"]
+    issues = [(i.code, i.index) for i in check_picks(picks, picks, 4, set(), aired, 30) if i.fatal]
+    assert issues == [("already_aired", 3)]
 
 
 def test_unparseable_links_in_newsletters_are_ignored():
@@ -217,6 +232,10 @@ def test_budget_cap_stops_calls_and_editor_falls_back(tmp_path):
 def test_spend_ledger_carries_the_month_across_runs(tmp_path):
     ledger = SpendLedger(tmp_path / "spend.json")
     ledger.add(12.5)
+    Usage(on_add=ledger.add).add("writer", "gpt-5", 1_000_000, 0)  # saved as it happens: +$1.25
+    assert SpendLedger(tmp_path / "spend.json").this_month() == pytest.approx(13.75)
+    ledger.months = {}
+    ledger.add(12.5)
     usage = Usage(month_cap_usd=18, month_spent_usd=SpendLedger(tmp_path / "spend.json").this_month())
     usage.add("writer", "gpt-5", 5_000_000, 0)  # $6.25
     assert usage.over_budget()
@@ -297,6 +316,23 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     llm = ScriptedLLM(script, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=0).write(_stories())
     assert ep.segments[0].text == TemplateWriter("Show", "Host").intro(2).text  # still bad: standard intro
+    no_change = {"intro": "", "outro": "", "segments": []}
+    llm = ScriptedLLM(_script(GOOD_A, GOOD_B), flagged, no_change, flagged)
+    ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
+    assert ep.segments[-1].text == TemplateWriter("Show", "Host").outro().text  # the critic's finding stuck
+    assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]
+
+
+def test_critic_sees_the_whole_article_and_the_show_details():
+    stories = _stories()
+    stories[0].body = "x " * 1600 + "MARKER fact"
+    script = _script(GOOD_A, GOOD_B)
+    script["title"] = "OpenAI raises 400 billion dollars"  # invented number in the YouTube title
+    llm = ScriptedLLM(script, NO_ISSUES)
+    ep = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0).write(stories)
+    critic_prompt = llm.calls[1][1]
+    assert "MARKER fact" in critic_prompt and "(Duck Desk)" in critic_prompt and "(Quackers)" in critic_prompt
+    assert ep.title == TemplateWriter("Duck Desk", "Quackers").write(stories).title
 
 
 def test_trim_rewrite_is_checked_like_the_draft():
@@ -306,12 +342,13 @@ def test_trim_rewrite_is_checked_like_the_draft():
     ep = writer.write(stories)
     short_a = "A revolutionary lab agent books travel in 9 steps."  # shorter, but hype and a new number
     short_b = "A new chip runs AI models 2 times faster at inference, so serving gets cheaper."
-    llm.replies = [{"intro": "", "outro": "Bye.", "segments": [
+    llm.replies = [{"intro": "A revolutionary day with 2 stories.", "outro": "Bye.", "segments": [
         {"story": 1, "headline": "Renamed", "key_fact": "9 steps", "text": short_a},
         {"story": 2, "headline": "Renamed too", "key_fact": "", "text": short_b}]}, NO_ISSUES]
     trimmed = writer.shorten(ep, stories, 10)
     assert [s.text for s in trimmed.story_segments] == [GOOD_A, short_b]  # the broken trim kept its old text
     assert [s.headline for s in trimmed.story_segments] == ["Lab ships agent", "Chip is faster"]
+    assert trimmed.segments[0] == ep.segments[0] and trimmed.segments[-1] == ep.segments[-1]
     assert [c[0] for c in llm.calls][-2:] == ["writer-trim", "critic"]
 
 
@@ -348,6 +385,12 @@ def test_number_rule_allows_rounding_and_spelled_out_numbers_but_not_new_ones():
             ("20 percent", "19.6%"), ("1.5b", "$1.49 billion")]
     for script, material in fine:
         assert unsupported_numbers(script, material) == [], (script, material)
+    assert unsupported_numbers("1.4 trillion dollars", "OpenAI signed $1.4T in compute deals") == []
+    assert unsupported_numbers("a 1 million token context", "a million-token context window") == []
+    assert unsupported_numbers("1 billion users", "one billion users") == []
+    # a wrong model version is not a rounding
+    assert unsupported_numbers("GPT-6 is now in ChatGPT", "OpenAI released GPT-5.5") == ["6"]
+    assert unsupported_numbers("Claude Sonnet 5", "Claude Sonnet 4.5") == ["5"]
     assert unsupported_numbers("in 2026", "in 2025") == ["2026"]
     assert unsupported_numbers("900 million dollars", "40 billion") == ["900 million"]
     assert unsupported_numbers("5 times faster", "faster") == ["5"]
@@ -356,6 +399,22 @@ def test_number_rule_allows_rounding_and_spelled_out_numbers_but_not_new_ones():
     ep = TemplateWriter("Show", "Host").write([story])
     ep.segments[1].text = "According to 404 Media, a report says models got faster."
     assert not [i for i in lint_episode(ep, [story]) if i.code == "unsupported_number"]
+    ep.segments[1].headline = "Models got 900 percent faster"  # the big on-screen headline is checked too
+    assert [i.code for i in lint_episode(ep, [story]) if i.code == "unsupported_number"] == ["unsupported_number"]
+
+
+def test_intro_may_use_the_show_name_and_date():
+    story = _story("Report", summary="A report says models got faster.")
+    ep = TemplateWriter("AI in 60 Seconds", "Quackers").write([story])
+    ep.segments[0].text = "Happy Friday, September 26! It's AI in 60 Seconds, with 1 story today."
+    frame = "AI in 60 Seconds Quackers Friday, September 26, 2026"
+    assert [i.code for i in lint_episode(ep, [story]) if i.code == "intro_problem"] == ["intro_problem"]
+    assert not [i for i in lint_episode(ep, [story], frame) if i.code == "intro_problem"]
+    script = _script(GOOD_A, GOOD_B)
+    script["intro"] = "It's AI in 60 Seconds with Quackers, and 2 AI stories today."
+    llm = ScriptedLLM(script, NO_ISSUES)
+    ep = CriticWriter(llm, llm, "AI in 60 Seconds", "Quackers").write(_stories())
+    assert [c[0] for c in llm.calls] == ["writer", "critic"] and ep.segments[0].text == script["intro"]
 
 
 def test_lint_catches_numbers_urls_and_length_and_trim_fits():

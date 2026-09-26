@@ -67,7 +67,8 @@ jobs:
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           UPLOAD: ${{ github.event_name == 'schedule' || inputs.upload }}
-        run: python -m shorts run $([ "$UPLOAD" = "true" ] && echo --upload)
+        # exec: a cancel or timeout then reaches Python itself, not only the shell around it.
+        run: exec python -m shorts run $([ "$UPLOAD" = "true" ] && echo --upload)
 
       - name: Save state
         # A failed run still spent money, so the monthly cap must count it.

@@ -14,8 +14,8 @@ from datetime import date
 from pathlib import Path
 from typing import Protocol
 
-from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, fatal, lint_episode,
-                     predicted_seconds)
+from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, episode_material, fatal,
+                     lint_episode, predicted_seconds, unsupported_numbers)
 from .llm import LLM, BudgetExceeded, strict_object
 from .models import Episode, Segment, Story
 
@@ -240,7 +240,7 @@ class CriticWriter:
         episode = assemble(self.base.draft(stories), stories, strict=False)
         issues: list[Issue] = []
         for round_no in range(self.max_repairs + 1):
-            issues = lint_episode(episode, stories)
+            issues = lint_episode(episode, stories, self.frame())
             try:
                 issues += self.review(episode, stories)
             except BudgetExceeded as exc:
@@ -259,11 +259,17 @@ class CriticWriter:
             except Exception as exc:
                 log.warning("      rewrite failed (%s)", exc)
                 break
-        return self.settle(episode, stories, fatal(lint_episode(episode, stories)) + [
+        return self.settle(episode, stories, fatal(lint_episode(episode, stories, self.frame())) + [
             i for i in fatal(issues) if i.code in ("unsupported_claim", "intro_problem", "outro_problem")])
 
+    def frame(self) -> str:
+        """What the intro and outro may mention besides the stories."""
+        return f"{self.base.show} {self.base.host} {date.today():%A, %B %d, %Y}"
+
     def review(self, episode: Episode, stories: list[Story]) -> list[Issue]:
-        user = f"=== SCRIPT ===\n{_script_rows(episode)}\n\n=== STORY MATERIAL ===\n{_story_block(stories)}"
+        user = (f"The intro and outro may name the show ({self.base.show}), the host ({self.base.host}) and today's "
+                f"date ({date.today():%A, %B %d, %Y}); those are not claims to check.\n\n"
+                f"=== SCRIPT ===\n{_script_rows(episode)}\n\n=== STORY MATERIAL ===\n{_story_block(stories)}")
         data = self.critic.json(CRITIC_SYSTEM, user, stage="critic", schema=REVIEW_SCHEMA)
         issues = []
         for code, key in (("intro_problem", "intro"), ("outro_problem", "outro")):
@@ -315,7 +321,7 @@ class CriticWriter:
                             issue.index + 1, issue.detail)
                 segments[issue.index + 1] = template_segment(stories[issue.index])
         episode = replace(episode, segments=segments)
-        if not episode.title:
+        if not episode.title or unsupported_numbers(episode.title, episode_material(stories, self.frame())):
             episode.title = self.template.write(stories).title
         return trim_to_fit(episode, TARGET_MAX_SECONDS)
 
@@ -330,11 +336,12 @@ class CriticWriter:
             log.warning("      trim rewrite failed (%s); trimming in code", exc)
             return episode
         old = episode.segments
-        # A trim changes only the spoken text; headlines and key facts stay as checked.
-        segments = [replace(new, headline=prev.headline, key_fact=prev.key_fact) if new.kind == "story" else new
+        # A trim changes only the stories' spoken text; the intro, outro, headlines and key facts
+        # stay as checked.
+        segments = [replace(new, headline=prev.headline, key_fact=prev.key_fact) if new.kind == "story" else prev
                     for new, prev in zip(shorter.segments, old)]
         shorter = replace(shorter, segments=segments)
-        issues = fatal(lint_episode(shorter, stories))
+        issues = fatal(lint_episode(shorter, stories, self.frame()))
         try:
             issues += self.review(shorter, stories)
         except Exception as exc:
@@ -342,8 +349,7 @@ class CriticWriter:
         for issue in issues:
             pos = _segment_position(issue)
             if pos is not None and segments[pos] != old[pos]:
-                log.warning("      the trim broke %s (%s); keeping the old text",
-                            "the intro" if pos == 0 else "the outro" if pos == -1 else f"story {pos}", issue.detail)
+                log.warning("      the trim broke story %d (%s); keeping the old text", pos, issue.detail)
                 segments[pos] = old[pos]
         shorter = replace(shorter, segments=segments)
         return shorter if predicted_seconds(shorter) < predicted_seconds(episode) else episode
