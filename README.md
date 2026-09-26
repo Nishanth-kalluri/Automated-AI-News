@@ -92,7 +92,7 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_NOTIFY_EMAIL` | variable | where the "episode ready" email goes |
 | `SHORTS_LLM_MODEL` | variable | optional; one model for every role (default: editor and writer `gpt-6-sol`, checker `gpt-6-luna`, `gpt-5` if those aren't available) |
 | `SHORTS_EDITOR_MODEL`, `SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL` | variables | optional, one role's model |
-| `SHORTS_AGENTS` | variable | optional, `off` for one-shot LLM calls |
+| `SHORTS_AGENTS`, `SHORTS_MAX_REPAIRS` | variables | optional, `off` for one-shot LLM calls; repair rounds per agent (default `2`) |
 | `SHORTS_BUDGET_USD`, `SHORTS_MONTHLY_BUDGET_USD` | variables | optional, default `0.60` and `18` |
 | `SHORTS_UPLOADER` | variable | `youtube` once the YouTube secrets are in |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |

@@ -6,10 +6,10 @@ a problem is described once and fixed by whichever stage can fix it.
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .models import Episode, Story
@@ -23,7 +23,23 @@ HYPE_WORDS = ("revolutionary", "game-changer", "game changer", "mind-blowing", "
 TITLE_MAX = 91  # the uploader appends " #Shorts" and YouTube allows 100 characters
 
 _URL_RE = re.compile(r"https?://[^\s)>\]\"'<]+")
-_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# A number as written, with an optional scale word: "93.4", "1,500,000", "$1.49 billion", "40k".
+_NUM_RE = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)(?:\s*(thousand|million|billion|trillion|bn|[kmb])\b)?", re.I)
+_SCALES = {"thousand": 1e3, "k": 1e3, "million": 1e6, "m": 1e6, "billion": 1e9, "bn": 1e9, "b": 1e9,
+           "trillion": 1e12}
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+                 "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "dozen": 12, "fifteen": 15, "twenty": 20,
+                 "thirty": 30, "forty": 40, "fifty": 50, "hundred": 100, "half": 0.5, "double": 2, "twice": 2,
+                 "triple": 3, "quarter": 0.25}
+# Words that say nothing about which event a headline is about; left out when comparing headlines.
+_FILLER = set("""a an the and or but of for to in on at by with from as is are was were be been being its it this that
+these those new now just ai how why what who says said say will can could may might more most over into after
+about than you your we our their they his her he she has have had not no gets get got adds add added makes make
+made launch launches launched unveil unveils unveiled release releases released announce announces announced
+ship ships shipped introduce introduces introduced debut debuts roll rolls rolled out rolling raise raises raised
+open opens opened build builds built model models tool tools feature features update updates version company
+startup lab labs report reports study billion million thousand dollar dollars percent funding round first big
+major latest today week again also here plus""".split())
 
 
 @dataclass
@@ -43,22 +59,54 @@ def is_sample(story: Story) -> bool:
 
 
 def norm_url(url: str) -> str:
-    """Comparable form of a URL: lower-case host, no tracking params, fragment or trailing slash."""
+    """Comparable form of a URL: lower-case host, no tracking params, fragment or trailing slash.
+
+    Empty for anything that isn't a parseable http(s) link.
+    """
     url = (url or "").strip()
     if not url.startswith("http"):
         return ""
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # e.g. "https://[UNSUBSCRIBE]" in a newsletter, or a bare IPv6 host
+        return ""
     query = urlencode([(k, v) for k, v in parse_qsl(parts.query) if not k.lower().startswith("utm_")])
     path = parts.path.rstrip("/")
     return urlunsplit(("https", parts.netloc.lower().removeprefix("www."), path, query, ""))
 
 
-def _norm_title(text: str) -> str:
-    return re.sub(r"[^a-z0-9 ]", "", (text or "").lower())
+def _event_words(text: str) -> set[str]:
+    """The words that identify an event: names, products, numbers. "GPT-6" and "4.1" stay whole."""
+    words = set()
+    for w in re.findall(r"[a-z0-9]+(?:[.-][a-z0-9]+)*", (text or "").lower()):
+        if w in _FILLER or (len(w) < 2 and not w.isdigit()):
+            continue
+        words.add(w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w)
+    return words - _FILLER
 
 
 def similar(a: str, b: str) -> float:
-    return SequenceMatcher(None, _norm_title(a), _norm_title(b)).ratio()
+    """Share of event words two headlines have in common (0 to 1)."""
+    wa, wb = _event_words(a), _event_words(b)
+    return len(wa & wb) / len(wa | wb) if wa and wb else 0.0
+
+
+def same_event(a: str, b: str) -> bool:
+    """Whether two headlines are about the same event.
+
+    Headlines follow a few patterns ("X unveils Y", "X raises N dollars"), so they are compared on
+    their event words only, and two headlines with different numbers are different events:
+    "Nvidia unveils new AI chip" and "AMD unveils new AI chip" are not the same story.
+    """
+    wa, wb = _event_words(a), _event_words(b)
+    nums_a = {w for w in wa if any(ch.isdigit() for ch in w)}
+    nums_b = {w for w in wb if any(ch.isdigit() for ch in w)}
+    if nums_a and nums_b and not nums_a & nums_b:
+        return False
+    shared = wa & wb
+    if wa and wa == wb:  # short headlines like "OpenAI model launch" and "OpenAI model launch again"
+        return True
+    return len(shared) >= 2 and (len(shared) / len(wa | wb) >= 0.5 or len(shared) / min(len(wa), len(wb)) >= 0.75)
 
 
 def source_urls(candidates: list[Story]) -> set[str]:
@@ -85,13 +133,13 @@ def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: 
             continue
         url = norm_url(s.url)
         for j, other in enumerate(picks[:i]):
-            if (url and url == norm_url(other.url)) or similar(name, other.headline or other.title) > 0.6:
+            if (url and url == norm_url(other.url)) or same_event(name, other.headline or other.title):
                 issues.append(Issue("duplicate", f"same event as story {j + 1} ({other.headline or other.title!r})", i))
                 break
         if url and url in aired_urls:
             issues.append(Issue("already_aired", f"{name!r} already aired (same link)", i))
         else:
-            match = next((h for h in aired_headlines if similar(name, h) > 0.7), None)
+            match = next((h for h in aired_headlines if same_event(name, h)), None)
             if match:
                 issues.append(Issue("already_aired", f"{name!r} looks like {match!r}, which already aired", i))
         if not url:
@@ -108,13 +156,78 @@ def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: 
     return issues
 
 
-def _numbers(text: str) -> set[str]:
-    return {m.replace(",", "").rstrip(".") for m in _NUM_RE.findall(text or "")}
+def _numbers(text: str) -> list[tuple[str, float, int]]:
+    """Every number in ``text`` as (how it was written, value with its scale word applied, decimals)."""
+    found = []
+    for m in _NUM_RE.finditer(text or ""):
+        digits, scale = m.group(1).replace(",", "").rstrip("."), (m.group(2) or "").lower()
+        try:
+            value = float(digits) * _SCALES.get(scale, 1)
+        except ValueError:
+            continue
+        found.append((m.group(0).strip(), value, len(digits.partition(".")[2])))
+    return found
+
+
+def _material_values(text: str) -> set[float]:
+    """Numbers a script may use: each number with and without its scale, the parts of a decimal
+    ("GPT-4.1" -> 4.1, 4, 1) and small numbers written as words."""
+    values: set[float] = set()
+    for m in _NUM_RE.finditer(text or ""):
+        digits = m.group(1).replace(",", "").rstrip(".")
+        try:
+            values.add(float(digits))
+            values.add(float(digits) * _SCALES.get((m.group(2) or "").lower(), 1))
+            values.update(float(part) for part in digits.split(".") if part)
+        except ValueError:
+            continue
+    values.update(v for w, v in _NUMBER_WORDS.items() if re.search(rf"\b{w}\b", (text or "").lower()))
+    return values
+
+
+def _round_sig(x: float, digits: int) -> float:
+    return 0.0 if x == 0 else round(x, digits - 1 - int(math.floor(math.log10(abs(x)))))
+
+
+def _supported(value: float, decimals: int, material: set[float]) -> bool:
+    """Exact, or the material number rounded to 2-3 significant figures or to the script's decimals:
+    "93 percent" for 93.4%, "1.5 billion" for $1.49 billion. A different year is never a rounding."""
+    for m in material:
+        if math.isclose(value, m, rel_tol=1e-9):
+            return True
+        if 1900 <= value <= 2100 and float(value).is_integer():
+            continue  # looks like a year: exact only
+        if any(math.isclose(value, _round_sig(m, d), rel_tol=1e-9) for d in (2, 3)):
+            return True
+        if math.isclose(value, round(m, decimals), rel_tol=1e-9) and abs(m) >= 1:
+            return True
+    return False
+
+
+def unsupported_numbers(text: str, material: str) -> list[str]:
+    values = _material_values(material)
+    return sorted({written for written, value, decimals in _numbers(text) if not _supported(value, decimals, values)})
 
 
 def predicted_seconds(episode: Episode) -> float:
     words = sum(len(s.text.split()) for s in episode.segments)
     return words / WORDS_PER_SECOND + SEGMENT_GAP * max(len(episode.segments) - 1, 0)
+
+
+def _material(story: Story) -> str:
+    return " ".join([story.title, story.headline, story.summary, story.body, story.key_fact, story.source,
+                     *story.outlets])
+
+
+def _speech_problems(text: str) -> list[str]:
+    lowered = text.lower()
+    problems = []
+    hype = [w for w in HYPE_WORDS if w in lowered]
+    if hype:
+        problems.append(f"uses hype words ({', '.join(hype)})")
+    if _URL_RE.search(text) or re.search(r"\bwww\.", lowered):
+        problems.append("reads out a web address")
+    return problems
 
 
 def lint_episode(episode: Episode, stories: list[Story]) -> list[Issue]:
@@ -128,6 +241,17 @@ def lint_episode(episode: Episode, stories: list[Story]) -> list[Issue]:
     segs = episode.story_segments
     if len(segs) != len(stories):
         issues.append(Issue("segment_count", f"{len(segs)} story segments for {len(stories)} stories"))
+    everything = " ".join(_material(s) for s in stories) + f" {len(stories)} {max(len(stories) - 1, 0)}"
+    for code, where, seg in (("intro_problem", "the intro", episode.segments[0]),
+                             ("outro_problem", "the outro", episode.segments[-1])):
+        if seg.kind not in ("intro", "outro") or not seg.text.strip():
+            continue
+        problems = _speech_problems(seg.text)
+        missing = unsupported_numbers(seg.text, everything)
+        if missing:
+            problems.append(f"uses {', '.join(missing)}, which is not in the story material")
+        if problems:
+            issues.append(Issue(code, f"{where} {'; '.join(problems)}"))
     for i, (seg, story) in enumerate(zip(segs, stories)):
         words = len(seg.text.split())
         if words > STORY_WORDS[1] + 6:
@@ -141,8 +265,7 @@ def lint_episode(episode: Episode, stories: list[Story]) -> list[Issue]:
             issues.append(Issue("hype", f"uses hype words ({', '.join(hype)})", i))
         if _URL_RE.search(seg.text) or re.search(r"\bwww\.", lowered):
             issues.append(Issue("url_in_narration", "reads out a web address", i))
-        material = " ".join([story.title, story.headline, story.summary, story.body, story.key_fact])
-        missing = sorted((_numbers(seg.text) | _numbers(seg.key_fact)) - _numbers(material))
+        missing = unsupported_numbers(f"{seg.text}\n{seg.key_fact}", _material(story))
         if missing:
             issues.append(Issue("unsupported_number",
                                 f"uses {', '.join(missing)}, which is not in the story material", i))

@@ -22,7 +22,8 @@ from .models import Episode, Segment, Story
 log = logging.getLogger(__name__)
 PERSONA_FILE = Path(__file__).with_name("persona.md")
 SIGN_OFF = "That's the news from the pond. See you tomorrow!"
-MATERIAL_MAX_CHARS = 3000  # article text per story shown to the critic
+# Problems about the intro or outro only; they don't open the story segments for rewriting.
+FRAME_CODES = ("missing_intro", "missing_outro", "intro_problem", "outro_problem")
 
 WRITER_SYSTEM = """You write the script for a daily 2 minute vertical YouTube Short.
 
@@ -62,6 +63,10 @@ REVISION_SCHEMA = strict_object({
         "headline": {"type": "string"}, "key_fact": {"type": "string"}, "text": {"type": "string"}})},
 })
 REVIEW_SCHEMA = strict_object({
+    "intro": {"type": "array", "items": {"type": "string"},
+              "description": "claims in the intro that the material does not support"},
+    "outro": {"type": "array", "items": {"type": "string"},
+              "description": "claims in the outro that the material does not support"},
     "segments": {"type": "array", "items": strict_object({
         "story": {"type": "integer", "description": "story number, starting at 1"},
         "unsupported": {"type": "array", "items": {"type": "string"},
@@ -70,8 +75,9 @@ REVIEW_SCHEMA = strict_object({
 
 CRITIC_SYSTEM = """You fact-check the script of a daily AI news Short against the source material for each story.
 For every story segment, list each claim (a name, number, date, quote or event) in the segment text or its key
-fact that the material does not support. Paraphrase and rounding are fine; new facts, wrong numbers and claims
-about the wrong company are not. Return an empty list for a segment with no problems."""
+fact that the material does not support. Check the intro and outro the same way against all the stories.
+Paraphrase and rounding are fine; new facts, wrong numbers and claims about the wrong company are not.
+Return an empty list for a segment with no problems."""
 
 REVISE_PROMPT = """Here is today's script and the story material. Fix only the problems listed below.
 
@@ -98,13 +104,13 @@ class ScriptWriter(Protocol):
     def write(self, stories: list[Story]) -> Episode: ...
 
 
-def _story_block(stories: list[Story], max_body: int | None = None) -> str:
+def _story_block(stories: list[Story]) -> str:
     out = []
     for i, s in enumerate(stories, 1):
         part = f"STORY {i}: {s.headline or s.title}\nCovered by: {', '.join(s.outlets or [s.source])}\n"
         part += f"Key fact: {s.key_fact}\nSummary: {s.summary}\n"
         if s.body:
-            part += f"Article text:\n{s.body[:max_body] if max_body else s.body}\n"
+            part += f"Article text:\n{s.body}\n"
         out.append(part)
     return "\n".join(out)
 
@@ -254,13 +260,17 @@ class CriticWriter:
                 log.warning("      rewrite failed (%s)", exc)
                 break
         return self.settle(episode, stories, fatal(lint_episode(episode, stories)) + [
-            i for i in fatal(issues) if i.code == "unsupported_claim"])
+            i for i in fatal(issues) if i.code in ("unsupported_claim", "intro_problem", "outro_problem")])
 
     def review(self, episode: Episode, stories: list[Story]) -> list[Issue]:
-        user = f"=== SCRIPT ===\n{_script_rows(episode)}\n\n=== STORY MATERIAL ===\n" \
-               f"{_story_block(stories, MATERIAL_MAX_CHARS)}"
+        user = f"=== SCRIPT ===\n{_script_rows(episode)}\n\n=== STORY MATERIAL ===\n{_story_block(stories)}"
         data = self.critic.json(CRITIC_SYSTEM, user, stage="critic", schema=REVIEW_SCHEMA)
         issues = []
+        for code, key in (("intro_problem", "intro"), ("outro_problem", "outro")):
+            claims = [c for c in data.get(key, []) if c]
+            if claims:
+                issues.append(Issue(code, f"the {key} makes claims the material does not support: "
+                                          + "; ".join(claims)))
         for item in data.get("segments", []):
             idx, claims = item.get("story", 0) - 1, [c for c in item.get("unsupported", []) if c]
             if 0 <= idx < len(stories) and claims:
@@ -269,9 +279,9 @@ class CriticWriter:
 
     def revise(self, episode: Episode, stories: list[Story], problems: list[Issue], *, stage: str) -> Episode:
         user = REVISE_PROMPT.format(problems="\n".join(p.line() for p in problems), script=_script_rows(episode),
-                                    material=_story_block(stories, MATERIAL_MAX_CHARS))
+                                    material=_story_block(stories))
         data = self.llm.json(self.base.system(len(stories)), user, stage=stage, schema=REVISION_SCHEMA)
-        whole_script = any(p.index is None for p in problems)
+        whole_script = any(p.index is None and p.code not in FRAME_CODES for p in problems)
         allowed = set(range(len(stories))) if whole_script else {p.index for p in problems}
         segments = list(episode.segments)
         for item in data.get("segments", []):
@@ -289,9 +299,11 @@ class CriticWriter:
         """Last resort for problems the rewrites didn't fix: template text or a trim, segment by segment."""
         segments = list(episode.segments)
         for issue in remaining:
-            if issue.code == "missing_intro":
+            if issue.code in ("missing_intro", "intro_problem"):
+                log.warning("      the intro still has a problem (%s); using the standard intro", issue.detail)
                 segments[0] = self.template.intro(len(stories))
-            elif issue.code == "missing_outro":
+            elif issue.code in ("missing_outro", "outro_problem"):
+                log.warning("      the outro still has a problem (%s); using the standard outro", issue.detail)
                 segments[-1] = self.template.outro()
             elif issue.index is None:
                 continue
@@ -308,16 +320,42 @@ class CriticWriter:
         return trim_to_fit(episode, TARGET_MAX_SECONDS)
 
     def shorten(self, episode: Episode, stories: list[Story], seconds_over: float) -> Episode:
+        """A shorter rewrite, checked like the draft: any rewritten part that now fails keeps its old text."""
         words = int(seconds_over * WORDS_PER_SECOND) + 4
         problem = Issue("too_long_total", f"the voiced episode runs {seconds_over:.0f}s too long; cut about {words} "
                                           "words, mostly from the longest segments")
         try:
             shorter = self.revise(episode, stories, [problem], stage="writer-trim")
-            if predicted_seconds(shorter) < predicted_seconds(episode):
-                episode = shorter
         except Exception as exc:
             log.warning("      trim rewrite failed (%s); trimming in code", exc)
-        return episode
+            return episode
+        old = episode.segments
+        # A trim changes only the spoken text; headlines and key facts stay as checked.
+        segments = [replace(new, headline=prev.headline, key_fact=prev.key_fact) if new.kind == "story" else new
+                    for new, prev in zip(shorter.segments, old)]
+        shorter = replace(shorter, segments=segments)
+        issues = fatal(lint_episode(shorter, stories))
+        try:
+            issues += self.review(shorter, stories)
+        except Exception as exc:
+            log.warning("      critic failed on the trim (%s); using the rule checks only", exc)
+        for issue in issues:
+            pos = _segment_position(issue)
+            if pos is not None and segments[pos] != old[pos]:
+                log.warning("      the trim broke %s (%s); keeping the old text",
+                            "the intro" if pos == 0 else "the outro" if pos == -1 else f"story {pos}", issue.detail)
+                segments[pos] = old[pos]
+        shorter = replace(shorter, segments=segments)
+        return shorter if predicted_seconds(shorter) < predicted_seconds(episode) else episode
+
+
+def _segment_position(issue: Issue) -> int | None:
+    """Where in ``episode.segments`` an issue points: 0 intro, -1 outro, i + 1 story i, None the whole episode."""
+    if issue.code in ("missing_intro", "intro_problem"):
+        return 0
+    if issue.code in ("missing_outro", "outro_problem"):
+        return -1
+    return None if issue.index is None else issue.index + 1
 
 
 def trim_to_fit(episode: Episode, max_seconds: float) -> Episode:
@@ -341,10 +379,11 @@ def shorten(writer: ScriptWriter, episode: Episode, stories: list[Story], measur
             max_seconds: float = TARGET_MAX_SECONDS) -> Episode:
     """The voiced episode came out too long: let the writer agent cut it, then make sure in code."""
     over = measured_seconds - max_seconds
+    # The voice runs at its own pace, so scale the target by how far off the prediction was
+    # for the script that was actually voiced.
+    pace = measured_seconds / max(predicted_seconds(episode), 1.0)
     if isinstance(writer, CriticWriter):
         episode = writer.shorten(episode, stories, over)
-    # The voice runs at its own pace, so scale the target by how far off the prediction was.
-    pace = measured_seconds / max(predicted_seconds(episode), 1.0)
     return trim_to_fit(episode, max_seconds / max(pace, 1.0) - 2)
 
 

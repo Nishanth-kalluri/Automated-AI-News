@@ -107,6 +107,8 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool) -> Path:
         log.info("      longer than %ds; trimming the script", TARGET_MAX_SECONDS)
         episode = shorten(writer, episode, stories, vo.duration)
         (run_dir / "03-episode.json").write_text(episode_json(episode))
+    if voice.name == "silent" and not offline:  # SHORTS_VOICE=silent, or edge-tts isn't installed
+        vo.silent_segments = list(range(len(episode.segments)))
 
     animator = build_animator(cfg.animator, seed=date.today().toordinal())
     log.info("[6/9] animating the host with %s", animator.name)

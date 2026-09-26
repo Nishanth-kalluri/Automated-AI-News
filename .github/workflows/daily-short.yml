@@ -31,10 +31,19 @@ jobs:
 
       # Stories that already aired and the month's LLM spend live on the `state` branch.
       - name: Load state
+        id: load
         run: |
           mkdir -p state
-          if git fetch --depth 1 origin state 2>/dev/null; then
+          # No branch yet (exit code 2) means a first run. Any other git error stops here, so the
+          # save step below can't replace good state with an empty one.
+          status=0
+          git ls-remote --exit-code --heads origin state >/dev/null || status=$?
+          if [ "$status" -eq 0 ]; then
+            git fetch --depth 1 origin state
             git archive FETCH_HEAD | tar -x -C state
+          elif [ "$status" -ne 2 ]; then
+            echo "::error::could not read the state branch (git exit code $status)"
+            exit "$status"
           fi
 
       - name: Make the episode
@@ -49,6 +58,7 @@ jobs:
           SHORTS_WRITER_MODEL: ${{ vars.SHORTS_WRITER_MODEL }}
           SHORTS_CHECKER_MODEL: ${{ vars.SHORTS_CHECKER_MODEL }}
           SHORTS_AGENTS: ${{ vars.SHORTS_AGENTS }}
+          SHORTS_MAX_REPAIRS: ${{ vars.SHORTS_MAX_REPAIRS }}
           SHORTS_BUDGET_USD: ${{ vars.SHORTS_BUDGET_USD }}
           SHORTS_MONTHLY_BUDGET_USD: ${{ vars.SHORTS_MONTHLY_BUDGET_USD }}
           SHORTS_NOTIFY_EMAIL: ${{ vars.SHORTS_NOTIFY_EMAIL }}
@@ -60,7 +70,8 @@ jobs:
         run: python -m shorts run $([ "$UPLOAD" = "true" ] && echo --upload)
 
       - name: Save state
-        if: always()  # a failed run still spent money; the monthly cap must count it
+        # A failed run still spent money, so the monthly cap must count it.
+        if: always() && steps.load.outcome == 'success'
         run: |
           cd state
           [ -n "$(ls -A)" ] || exit 0

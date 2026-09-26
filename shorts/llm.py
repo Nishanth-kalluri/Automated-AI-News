@@ -24,8 +24,9 @@ from .config import Config
 log = logging.getLogger(__name__)
 
 # USD per 1M tokens: (input, cached input, output). Checked on OpenAI's pricing page on
-# 2026-09-26 except gpt-5-mini (third-party table). Unknown models are priced high on
-# purpose, so a missing entry can only make the budget cap trip early.
+# 2026-09-26 except gpt-5-mini (third-party table). Only an exact name or a dated snapshot
+# ("gpt-5-2025-08-07") matches, so "gpt-5-pro" or "gpt-5.5" is not priced as gpt-5. Unknown
+# models are priced high on purpose, so a missing entry can only make the budget cap trip early.
 PRICES = {
     "gpt-6-sol": (2.00, 0.20, 10.00),
     "gpt-6-luna": (0.10, 0.01, 0.50),
@@ -33,6 +34,7 @@ PRICES = {
     "gpt-5-mini": (0.25, 0.025, 2.00),
 }
 UNKNOWN_PRICE = (5.00, 0.50, 25.00)
+PRO_PRICE = (15.00, 1.50, 120.00)  # "pro" tiers cost far more than their base model
 TOOL_OUTPUT_MAX_CHARS = 8000
 
 
@@ -41,10 +43,10 @@ class BudgetExceeded(RuntimeError):
 
 
 def price(model: str) -> tuple[float, float, float]:
-    for name in sorted(PRICES, key=len, reverse=True):  # "gpt-5-mini-2026..." matches gpt-5-mini
-        if model.startswith(name):
-            return PRICES[name]
-    return UNKNOWN_PRICE
+    for name, p in PRICES.items():
+        if model == name or re.fullmatch(re.escape(name) + r"-\d{4}-\d{2}-\d{2}", model):
+            return p
+    return PRO_PRICE if re.search(r"-pro\b", model) else UNKNOWN_PRICE
 
 
 @dataclass
@@ -222,8 +224,10 @@ class OpenAILLM:
 
 
 def _is_model_error(exc: Exception) -> bool:
-    status = getattr(exc, "status_code", None)
-    return status in (400, 404) and "model" in str(exc).lower()
+    """The model doesn't exist or this key may not use it (a restricted project key answers 403)."""
+    if getattr(exc, "code", None) == "model_not_found":
+        return True
+    return getattr(exc, "status_code", None) in (400, 403, 404) and "model" in str(exc).lower()
 
 
 class AnthropicLLM:

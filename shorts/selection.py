@@ -15,7 +15,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Protocol
 
-from .checks import check_picks, fatal, norm_url, similar
+from .checks import check_picks, fatal, norm_url, same_event, similar
 from .llm import LLM, BudgetExceeded, Tool, strict_object
 from .models import Story
 
@@ -251,8 +251,9 @@ def candidate_search(candidates: list[Story], query: str, limit: int = 8) -> dic
 def aired_search(seen: SeenStore, headline: str) -> dict:
     scored = sorted(((similar(headline, e.get("headline", "")), e) for e in seen.entries if e.get("headline")),
                     key=lambda x: x[0], reverse=True)
-    return {"aired": [{"date": e.get("date", ""), "headline": e["headline"], "similarity": round(r, 2)}
-                      for r, e in scored[:3] if r >= 0.45]}
+    return {"aired": [{"date": e.get("date", ""), "headline": e["headline"], "similarity": round(r, 2),
+                       "same_event": same_event(headline, e["headline"])}
+                      for r, e in scored[:3] if r >= 0.3]}
 
 
 class AgentEditor:
@@ -300,10 +301,13 @@ class AgentEditor:
             try:
                 data = self.llm.json(EDITOR_SYSTEM, prompt + repair, stage=f"editor-repair-{round_no}",
                                      schema=EDITOR_SCHEMA)
+                picks = LLMEditor.to_stories(data, candidates, n) or picks
             except BudgetExceeded as exc:
                 log.warning("      %s", exc)
                 break
-            picks = LLMEditor.to_stories(data, candidates, n) or picks
+            except Exception as exc:  # keep the draft; settle() and the top-up take it from here
+                log.warning("      editor repair failed (%s); keeping the current picks", exc)
+                break
         return picks
 
 

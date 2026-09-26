@@ -31,7 +31,9 @@ def check(video: Path, episode: Episode, expected_stories: int, voice: Voiceover
         problems.append(f"video is only {duration:.0f}s")
     if not has_audio(video):
         problems.append("video has no audio track")
-    if voice and voice.silent_segments:
+    if voice and len(voice.silent_segments) >= len(episode.segments):
+        problems.append("the episode has no voice at all (SHORTS_VOICE=silent, or edge-tts is not installed)")
+    elif voice and voice.silent_segments:
         names = ", ".join("intro" if i == 0 else "outro" if i == len(episode.segments) - 1 else f"story {i}"
                           for i in voice.silent_segments)
         problems.append(f"the voice failed and left silence for: {names}")

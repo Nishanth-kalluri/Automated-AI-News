@@ -1,18 +1,21 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from shorts import qa, sources, voice
-from shorts.checks import TARGET_MAX_SECONDS, check_picks, lint_episode, norm_url, predicted_seconds
+from shorts import pipeline, qa, sources, voice
+from shorts.checks import (TARGET_MAX_SECONDS, check_picks, lint_episode, norm_url, predicted_seconds, same_event,
+                           source_urls, unsupported_numbers)
+from shorts.config import Config
 from shorts.composer import CAPTION_MAX_W, caption_chunks, caption_width, captions_ass
-from shorts.llm import BudgetExceeded, OpenAILLM, SpendLedger, Usage
+from shorts.llm import PRICES, PRO_PRICE, UNKNOWN_PRICE, BudgetExceeded, OpenAILLM, SpendLedger, Usage, price
 from shorts.models import Episode, Segment, Story, Voiceover, Word
 from shorts.selection import AgentEditor, SeenStore, pick_with_fallback
 from shorts.upload import youtube_title
 from shorts.visuals import CHIP_TEXT_MAX_W, chip_text
-from shorts.writer import CriticWriter, TemplateWriter, trim_to_fit
+from shorts.writer import CriticWriter, TemplateWriter, shorten, trim_to_fit
 
 NOW = datetime.now(timezone.utc)
 
@@ -90,6 +93,22 @@ def test_check_picks_flags_duplicates_repeats_made_up_links_stale_and_samples():
     assert norm_url("https://www.Lab.ai/post/?utm_source=x#top") == "https://lab.ai/post"
 
 
+def test_same_event_compares_names_and_numbers_not_headline_shape():
+    assert not same_event("Nvidia unveils new AI chip", "AMD unveils new AI chip")
+    assert not same_event("Anthropic raises 10 billion dollars", "OpenAI raises 40 billion dollars")
+    assert same_event("OpenAI launches GPT-6 Sol", "OpenAI releases GPT-6 Sol model")
+    assert same_event("Meta releases Llama 5", "Meta's Llama 5 is out")
+    picks = [_story("Nvidia unveils new AI chip"), _story("AMD unveils new AI chip")]
+    assert not [i for i in check_picks(picks, picks, 2, set(), ["OpenAI raises 40 billion dollars"], 30) if i.fatal]
+
+
+def test_unparseable_links_in_newsletters_are_ignored():
+    letter = _story("Letter", kind="newsletter", url="",
+                    body="Run it at http://[::1]:8080 or unsubscribe: https://[UNSUBSCRIBE_LINK] (https://lab.ai/x)")
+    assert source_urls([letter]) == {"https://lab.ai/x"}
+    assert norm_url("https://[UNSUB") == ""
+
+
 def test_agent_editor_sends_only_failing_slots_back_and_keeps_good_picks(tmp_path):
     candidates = [_story("OpenAI ships GPT agent"), _story("Nvidia unveils AI chip"), _story("EU AI rules")]
     first = {"stories": [_pick("OpenAI ships GPT agent", candidates[0].url),
@@ -119,6 +138,17 @@ def test_bad_editor_picks_are_dropped_or_fixed_and_topped_up(tmp_path):
     assert picks[0].headline == "OpenAI model launch" and picks[0].url == ""  # made-up link removed, story kept
     assert "Anthropic ships Claude agent" not in [p.headline for p in picks]  # already aired
     assert {"Nvidia AI chip", "Google Gemini update"} <= {p.headline for p in picks}  # topped up
+
+
+def test_editor_keeps_its_draft_when_a_repair_call_fails(tmp_path):
+    candidates = [_story("OpenAI ships GPT agent"), _story("Nvidia unveils AI chip"), _story("EU passes AI rules")]
+    draft = {"stories": [_pick("OpenAI ships GPT agent", candidates[0].url, summary="Written by the editor."),
+                         _pick("Nvidia unveils AI chip", candidates[1].url),
+                         _pick("OpenAI ships a GPT agent", candidates[0].url)]}
+    llm = ScriptedLLM(draft, TimeoutError("read timed out"))
+    picks = pick_with_fallback(AgentEditor(llm, 30), candidates, 3, SeenStore(tmp_path / "seen.json"), 30)
+    assert [p.headline for p in picks] == ["OpenAI ships GPT agent", "Nvidia unveils AI chip", "EU passes AI rules"]
+    assert picks[0].summary == "Written by the editor."  # the draft survived; only the duplicate was replaced
 
 
 def test_editor_tool_loop_calls_tools_and_returns_the_answer(tmp_path):
@@ -154,6 +184,22 @@ def test_unavailable_model_falls_back_once():
     fake.replies.insert(0, err)
     assert llm.json("s", "u", stage="writer") == {"ok": True}
     assert llm.model == "gpt-5" and llm.usage.calls[0]["model"] == "gpt-5"
+
+
+def test_restricted_key_falls_back_to_the_base_model():
+    err = type("PermissionDeniedError", (Exception,), {"status_code": 403, "code": "model_not_found"})(
+        "Project proj_x does not have access to model gpt-6-sol")
+    base, fake = _openai(_resp(text='{"ok": true}'))
+    llm = base.with_model("gpt-6-sol")
+    fake.replies.insert(0, err)
+    assert llm.json("s", "u", stage="editor") == {"ok": True} and llm.model == "gpt-5"
+
+
+def test_prices_match_exact_names_and_dated_snapshots_only():
+    assert price("gpt-5") == price("gpt-5-2025-08-07") == PRICES["gpt-5"]
+    assert price("gpt-5-mini") == PRICES["gpt-5-mini"] and price("gpt-6-luna") == PRICES["gpt-6-luna"]
+    assert price("gpt-5.5") == price("gpt-6-sol-mini") == UNKNOWN_PRICE
+    assert price("gpt-5-pro") == price("gpt-6-sol-pro") == PRO_PRICE
 
 
 def test_budget_cap_stops_calls_and_editor_falls_back(tmp_path):
@@ -223,6 +269,70 @@ def test_critic_findings_that_survive_the_repairs_fall_back_per_segment():
     assert ep.story_segments[1].text.startswith("Chip is faster. The new chip is 2 times faster")  # from summary
 
 
+def test_a_claim_only_the_critic_catches_falls_back_after_the_repairs():
+    claim_a = GOOD_A.replace("asks before paying", "pays for everything itself")  # no number for the rules to see
+    flagged = {"intro": [], "outro": [], "segments": [{"story": 1, "unsupported": ["pays for everything itself"]}]}
+    no_change = {"intro": "", "outro": "", "segments": []}
+    llm = ScriptedLLM(_script(claim_a, GOOD_B), flagged, no_change, flagged, no_change, flagged)
+    ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=2).write(_stories())
+    assert not lint_episode(replace(ep, segments=[ep.segments[0], Segment("story", claim_a, "Lab ships agent"),
+                                                  *ep.segments[2:]]), _stories())  # invisible to the rules
+    assert ep.story_segments[0].text.startswith("Lab ships agent. The lab shipped")  # template line
+    assert ep.story_segments[1].text == GOOD_B
+    assert [c[0] for c in llm.calls].count("critic") == 3
+
+
+def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
+    script = _script(GOOD_A, GOOD_B)
+    script["intro"] = "A revolutionary day: the lab raised 400 billion dollars, plus 1 more story."
+    flagged = {"intro": [], "outro": ["claims the show is on every night"], "segments": []}
+    revision = {"intro": "The lab's agent books travel now, plus 1 more AI story.", "outro": "",
+                "segments": [{"story": 1, "headline": "x", "key_fact": "x", "text": "must be ignored"}]}
+    llm = ScriptedLLM(script, flagged, revision, NO_ISSUES)
+    ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
+    problems = llm.calls[2][1]
+    assert "the intro uses hype words" in problems and "400 billion" in problems and "the outro" in problems
+    assert ep.segments[0].text == "The lab's agent books travel now, plus 1 more AI story."
+    assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]  # frame problems don't open the stories
+    llm = ScriptedLLM(script, NO_ISSUES)
+    ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=0).write(_stories())
+    assert ep.segments[0].text == TemplateWriter("Show", "Host").intro(2).text  # still bad: standard intro
+
+
+def test_trim_rewrite_is_checked_like_the_draft():
+    stories = _stories()
+    llm = ScriptedLLM(_script(GOOD_A, GOOD_B), NO_ISSUES)
+    writer = CriticWriter(llm, llm, "Show", "Host", max_repairs=0)
+    ep = writer.write(stories)
+    short_a = "A revolutionary lab agent books travel in 9 steps."  # shorter, but hype and a new number
+    short_b = "A new chip runs AI models 2 times faster at inference, so serving gets cheaper."
+    llm.replies = [{"intro": "", "outro": "Bye.", "segments": [
+        {"story": 1, "headline": "Renamed", "key_fact": "9 steps", "text": short_a},
+        {"story": 2, "headline": "Renamed too", "key_fact": "", "text": short_b}]}, NO_ISSUES]
+    trimmed = writer.shorten(ep, stories, 10)
+    assert [s.text for s in trimmed.story_segments] == [GOOD_A, short_b]  # the broken trim kept its old text
+    assert [s.headline for s in trimmed.story_segments] == ["Lab ships agent", "Chip is faster"]
+    assert [c[0] for c in llm.calls][-2:] == ["writer-trim", "critic"]
+
+
+def test_length_trim_paces_from_the_script_that_was_voiced():
+    long_text = " ".join(["word"] * 60) + "."
+    stories = [_story(f"S{i}") for i in range(8)]
+    ep = TemplateWriter("Show", "Host").write(stories)
+    ep = replace(ep, segments=[ep.segments[0], *[Segment("story", long_text)] * 8, ep.segments[-1]])
+    cut = replace(ep, segments=[ep.segments[0], *[Segment("story", " ".join(["word"] * 40) + ".")] * 8,
+                                ep.segments[-1]])
+
+    class FixedTrim(CriticWriter):
+        def shorten(self, episode, stories, seconds_over):
+            return cut
+
+    writer = FixedTrim(None, None, "Show", "Host")
+    measured = predicted_seconds(ep)  # the voice ran exactly at the predicted pace
+    assert predicted_seconds(cut) < TARGET_MAX_SECONDS < measured
+    assert shorten(writer, ep, stories, measured) == cut  # already fits: nothing more is cut
+
+
 def test_critic_writer_fills_a_missing_segment_instead_of_dropping_the_script():
     short = _script(GOOD_A, GOOD_B)
     short["segments"] = short["segments"][:1]
@@ -230,6 +340,22 @@ def test_critic_writer_fills_a_missing_segment_instead_of_dropping_the_script():
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=0).write(_stories())
     assert ep.story_segments[0].text == GOOD_A and ep.story_segments[1].text.startswith("Chip is faster.")
     assert ep.title == "AI today"
+
+
+def test_number_rule_allows_rounding_and_spelled_out_numbers_but_not_new_ones():
+    fine = [("93 percent", "93.4%"), ("about 1.5 billion dollars", "$1.49 billion"), ("40 thousand", "40,000"),
+            ("1.5 million", "$1,500,000"), ("3 new models", "three new models"), ("GPT 4 point 1", "GPT-4.1"),
+            ("20 percent", "19.6%"), ("1.5b", "$1.49 billion")]
+    for script, material in fine:
+        assert unsupported_numbers(script, material) == [], (script, material)
+    assert unsupported_numbers("in 2026", "in 2025") == ["2026"]
+    assert unsupported_numbers("900 million dollars", "40 billion") == ["900 million"]
+    assert unsupported_numbers("5 times faster", "faster") == ["5"]
+    story = _story("Report", summary="A report says models got faster.", source="404 Media")
+    story.headline = story.title
+    ep = TemplateWriter("Show", "Host").write([story])
+    ep.segments[1].text = "According to 404 Media, a report says models got faster."
+    assert not [i for i in lint_episode(ep, [story]) if i.code == "unsupported_number"]
 
 
 def test_lint_catches_numbers_urls_and_length_and_trim_fits():
@@ -278,6 +404,23 @@ def test_qa_blocks_silent_segments_and_sample_stories(monkeypatch, tmp_path):
     assert any("story 2" in p for p in report.problems) and any("sample" in p for p in report.problems)
     assert qa.check(tmp_path / "v.mp4", ep, 2, Voiceover(tmp_path / "v.wav", 120.0, []), allow_sample=True).passed
     assert not qa.check(tmp_path / "v.mp4", ep, 3, None, allow_sample=True).passed  # too few stories
+
+
+def test_live_run_with_no_voice_fails_qa(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHORTS_OUTPUT_DIR", str(tmp_path / "out"))
+    monkeypatch.setenv("SHORTS_STATE_DIR", str(tmp_path / "state"))
+    titles = ["OpenAI ships GPT agent", "Nvidia unveils inference chip", "EU passes AI audit rules",
+              "Anthropic raises funding for Claude", "Google Gemini tops math olympiad", "Meta open sources Llama",
+              "Mistral releases coding model", "DeepMind robot learns to cook"]
+    live = [_story(t, summary="An AI model from OpenAI shipped today.") for t in titles]
+    monkeypatch.setattr(pipeline, "fetch_all", lambda sources: live)
+    monkeypatch.setattr(pipeline.composer, "render", lambda vo, cards, desk, host, out, preset: out)
+    monkeypatch.setattr(qa, "media_duration", lambda p: 120.0)
+    monkeypatch.setattr(qa, "has_audio", lambda p: True)
+    cfg = replace(Config.from_env().offline(), sources=["rss"])  # live news, but SHORTS_VOICE=silent
+    with pytest.raises(RuntimeError, match="no voice at all"):
+        pipeline.run(cfg)
+    assert not (tmp_path / "state" / "seen_urls.json").exists()
 
 
 def test_narrate_reuses_unchanged_clips(tmp_path):
