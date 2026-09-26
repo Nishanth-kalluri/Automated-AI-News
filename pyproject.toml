@@ -30,3 +30,6 @@ packages = ["shorts"]
 
 [tool.setuptools.package-data]
 shorts = ["persona.md"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]  # the tests share helpers (from tests.test_agents import ...)
