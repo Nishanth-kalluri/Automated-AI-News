@@ -11,7 +11,7 @@ on:
         default: true
 
 permissions:
-  contents: write  # to save state (already-aired stories, monthly LLM spend) on the `state` branch
+  contents: write  # to save state (already-aired stories, LLM spend, Tavily credits) on the `state` branch
 
 concurrency:
   group: daily-short
@@ -29,7 +29,8 @@ jobs:
       - run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
       - run: pip install ".[all]"
 
-      # Stories that already aired and the month's LLM spend live on the `state` branch.
+      # The `state` branch holds the stories that already aired (seen_urls.json), the month's LLM
+      # spend (spend.json), Tavily credits (tavily.json) and the shadow week's rows (shadow.jsonl).
       - name: Load state
         id: load
         run: |
@@ -61,6 +62,10 @@ jobs:
           SHORTS_MAX_REPAIRS: ${{ vars.SHORTS_MAX_REPAIRS }}
           SHORTS_BUDGET_USD: ${{ vars.SHORTS_BUDGET_USD }}
           SHORTS_MONTHLY_BUDGET_USD: ${{ vars.SHORTS_MONTHLY_BUDGET_USD }}
+          SHORTS_WEB: ${{ vars.SHORTS_WEB }}
+          SHORTS_SHADOW: ${{ vars.SHORTS_SHADOW }}
+          SHORTS_TAVILY_MONTHLY_CREDITS: ${{ vars.SHORTS_TAVILY_MONTHLY_CREDITS }}
+          SHORTS_TAVILY_RUN_CREDITS: ${{ vars.SHORTS_TAVILY_RUN_CREDITS }}
           SHORTS_NOTIFY_EMAIL: ${{ vars.SHORTS_NOTIFY_EMAIL }}
           SHORTS_UPLOADER: ${{ vars.SHORTS_UPLOADER || 'local' }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
@@ -90,4 +95,7 @@ jobs:
             output/*/short.mp4
             output/*/*.json
             output/*/captions.ass
+            output/*/shadow/short.mp4
+            output/*/shadow/*.json
+            output/*/shadow/captions.ass
           if-no-files-found: ignore

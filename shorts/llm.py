@@ -13,7 +13,10 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -65,26 +68,33 @@ class Usage:
     month_spent_usd: float = 0.0  # spent by earlier runs this month
     # Called with each call's dollars as it happens, so the ledger is saved even if the run is killed.
     on_add: Callable[[float], None] | None = field(default=None, repr=False, compare=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)  # researchers run in threads
 
     def add(self, stage: str, model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> None:
         p_in, p_cached, p_out = price(model)
         usd = ((input_tokens - cached_tokens) * p_in + cached_tokens * p_cached + output_tokens * p_out) / 1e6
-        self.calls.append({"stage": stage, "model": model, "input_tokens": input_tokens,
-                           "cached_tokens": cached_tokens, "output_tokens": output_tokens, "usd": round(usd, 5)})
-        if self.on_add:
-            self.on_add(usd)
+        with self._lock:
+            self.calls.append({"stage": stage, "model": model, "input_tokens": input_tokens,
+                               "cached_tokens": cached_tokens, "output_tokens": output_tokens, "usd": round(usd, 5)})
+            if self.on_add:
+                self.on_add(usd)
 
     @property
     def total_usd(self) -> float:
-        return sum(c["usd"] for c in self.calls)
+        with self._lock:
+            return sum(c["usd"] for c in self.calls)
 
-    def over_budget(self) -> bool:
-        return self.total_usd >= self.run_cap_usd or self.month_spent_usd + self.total_usd >= self.month_cap_usd
+    def over_budget(self, reserve_usd: float = 0.0) -> bool:
+        """``reserve_usd`` keeps that much of both caps back for later stages (the researchers leave
+        room for the writer)."""
+        spent = self.total_usd + reserve_usd
+        return spent >= self.run_cap_usd or self.month_spent_usd + spent >= self.month_cap_usd
 
-    def check(self, stage: str) -> None:
-        if self.over_budget():
+    def check(self, stage: str, reserve_usd: float = 0.0) -> None:
+        if self.over_budget(reserve_usd):
+            held = f", keeping ${reserve_usd:.2f} for later stages" if reserve_usd else ""
             raise BudgetExceeded(f"{stage}: spending cap reached (${self.total_usd:.2f} this run, "
-                                 f"${self.month_spent_usd + self.total_usd:.2f} this month)")
+                                 f"${self.month_spent_usd + self.total_usd:.2f} this month{held})")
 
 
 class SpendLedger:
@@ -105,8 +115,15 @@ class SpendLedger:
         if usd <= 0:
             return
         self.months[self._month()] = round(self.this_month() + usd, 5)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.months, indent=1))
+        write_json(self.path, self.months)
+
+
+def write_json(path: Path, data) -> None:
+    """Write through a temporary file, so a run killed mid-write never leaves half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(json.dumps(data, indent=1))
+    os.replace(tmp, path)
 
 
 @dataclass
@@ -157,6 +174,23 @@ def strict_object(properties: dict, *, description: str = "") -> dict:
     return schema
 
 
+def capped(tools: list[Tool], limit: int) -> list[Tool]:
+    """The same tools sharing one call budget; calls past ``limit`` get an error instead of running."""
+    lock, used = threading.Lock(), [0]
+
+    def wrap(tool: Tool) -> Tool:
+        def fn(**kwargs):
+            with lock:
+                used[0] += 1
+                over = used[0] > limit
+            if over:
+                return "error: tool limit reached; answer with what you have"
+            return tool.fn(**kwargs)
+        return Tool(tool.name, tool.description, tool.parameters, fn)
+
+    return [wrap(t) for t in tools]
+
+
 def with_model(llm: LLM | None, model: str) -> LLM | None:
     """The same provider, usage and caps, but a different model (for per-role models)."""
     if llm is None or not model or model == llm.model or not hasattr(llm, "with_model"):
@@ -174,13 +208,23 @@ class OpenAILLM:
             client = OpenAI(api_key=api_key, timeout=300, max_retries=3)
         self.client, self.model, self.usage = client, model, usage
         self.fallback_model = fallback_model if fallback_model != model else ""
+        self.reserve_usd = 0.0  # budget this instance leaves for later stages
 
     def with_model(self, model: str) -> "OpenAILLM":
         return OpenAILLM("", model, self.usage, fallback_model=self.model, client=self.client)
 
+    def worker(self, *, timeout: float = 45.0, max_retries: int = 1, reserve_usd: float = 0.0) -> "OpenAILLM":
+        """A copy for one thread: same model, fallback and usage, its own fallback state, shorter timeouts."""
+        client = self.client
+        if hasattr(client, "with_options"):
+            client = client.with_options(timeout=timeout, max_retries=max_retries)
+        clone = OpenAILLM("", self.model, self.usage, fallback_model=self.fallback_model, client=client)
+        clone.reserve_usd = reserve_usd
+        return clone
+
     def _create(self, stage: str, **kwargs):
         """One Responses API call, priced and recorded. Falls back once if the model isn't available."""
-        self.usage.check(stage)
+        self.usage.check(stage, self.reserve_usd)
         try:
             resp = self.client.responses.create(model=self.model, **kwargs)
         except Exception as exc:
@@ -208,10 +252,11 @@ class OpenAILLM:
         return parse_json(resp.output_text or "")
 
     def run_tools(self, system: str, user: str, tools: list[Tool], *, stage: str, schema: dict | None = None,
-                  max_turns: int = 6) -> dict:
+                  max_turns: int = 6, deadline: float | None = None) -> dict:
         """Let the model call ``tools`` for up to ``max_turns`` turns, then return its JSON answer.
 
-        On the last turn tools are switched off, so the loop always ends with an answer.
+        On the last turn, or once ``time.monotonic()`` passes ``deadline``, tools are switched off,
+        so the loop always ends with an answer.
         """
         by_name = {t.name: t for t in tools}
         specs = [t.spec() for t in tools]
@@ -227,9 +272,11 @@ class OpenAILLM:
                 result = tool.call(c.arguments) if tool else f"error: no tool named {c.name}"
                 log.info("      %s -> %s(%s)", stage, c.name, (c.arguments or "")[:120])
                 outputs.append({"type": "function_call_output", "call_id": c.call_id, "output": result})
-            last = turn == max_turns
+            last = turn == max_turns or (deadline is not None and time.monotonic() >= deadline)
             resp = self._create(stage, instructions=system, input=outputs, previous_response_id=resp.id,
                                 tools=specs, tool_choice="none" if last else "auto", text=text)
+            if last:
+                break
         return parse_json(resp.output_text or "")
 
 

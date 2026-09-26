@@ -1,6 +1,6 @@
 [project]
 name = "ai-shorts"
-version = "0.3.0"
+version = "0.4.0"
 description = "Turn the latest AI news into YouTube Shorts, end to end."
 requires-python = ">=3.10"
 dependencies = [

@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, episode_material, fatal,
                      lint_episode, predicted_seconds, unsupported_numbers)
@@ -79,6 +80,12 @@ fact that the material does not support. Check the intro and outro the same way 
 Paraphrase and rounding are fine; new facts, wrong numbers and claims about the wrong company are not.
 Return an empty list for a segment with no problems."""
 
+CRITIC_EVIDENCE_NOTE = """
+Some stories list Evidence (verbatim quotes from the sources) and a First reported date. For those, check the
+segment, headline and key fact against the Evidence first: a claim is supported only if the Evidence or the
+Summary states it, and where they disagree the Evidence wins. "Today", "yesterday" or "this week" in conflict
+with the First reported date is unsupported. Check stories without Evidence as before."""
+
 REVISE_PROMPT = """Here is today's script and the story material. Fix only the problems listed below.
 
 === PROBLEMS ===
@@ -105,11 +112,19 @@ class ScriptWriter(Protocol):
 
 
 def _story_block(stories: list[Story]) -> str:
+    """The story material the writer and the critic both see. A researched story shows its
+    checked quotes instead of the article text."""
     out = []
     for i, s in enumerate(stories, 1):
         part = f"STORY {i}: {s.headline or s.title}\nCovered by: {', '.join(s.outlets or [s.source])}\n"
+        if s.first_reported:
+            part += f"First reported: {s.first_reported}\n"
         part += f"Key fact: {s.key_fact}\nSummary: {s.summary}\n"
-        if s.body:
+        if s.evidence:
+            part += "Evidence (verbatim quotes from the sources):\n" + "".join(
+                f'[E{k}] "{e.quote}" ({(urlsplit(e.url).hostname or "source").removeprefix("www.")})\n'
+                for k, e in enumerate(s.evidence, 1))
+        elif s.body:
             part += f"Article text:\n{s.body}\n"
         out.append(part)
     return "\n".join(out)
@@ -235,19 +250,27 @@ class CriticWriter:
         self.base = LLMWriter(llm, show, host)
         self.llm, self.critic, self.max_repairs = llm, critic, max_repairs
         self.template = TemplateWriter(show, host)
+        # What each round found and what fell back to templates; saved as 03-review.json.
+        self.report: dict = {"rounds": [], "fallbacks": [], "critic_errors": 0}
 
     def write(self, stories: list[Story]) -> Episode:
+        self.report = {"rounds": [], "fallbacks": [], "critic_errors": 0}
         episode = assemble(self.base.draft(stories), stories, strict=False)
         issues: list[Issue] = []
         for round_no in range(self.max_repairs + 1):
             issues = lint_episode(episode, stories, self.frame())
+            rules = len(fatal(issues))
             try:
                 issues += self.review(episode, stories)
             except BudgetExceeded as exc:
                 log.warning("      %s", exc)
+                self.report["critic_errors"] += 1
             except Exception as exc:  # the critic is an extra check, never a reason to fail
                 log.warning("      critic failed (%s); using the rule checks only", exc)
+                self.report["critic_errors"] += 1
             todo = fatal(issues)
+            self.report["rounds"].append({"fatal": rules, "critic": len(todo) - rules,
+                                          "problems": [i.line()[2:] for i in todo]})
             if not todo or round_no == self.max_repairs:
                 break
             log.info("      writer repair round %d: %s", round_no + 1, "; ".join(i.line()[2:] for i in todo))
@@ -270,7 +293,8 @@ class CriticWriter:
         user = (f"The intro and outro may name the show ({self.base.show}), the host ({self.base.host}) and today's "
                 f"date ({date.today():%A, %B %d, %Y}); those are not claims to check.\n\n"
                 f"=== SCRIPT ===\n{_script_rows(episode)}\n\n=== STORY MATERIAL ===\n{_story_block(stories)}")
-        data = self.critic.json(CRITIC_SYSTEM, user, stage="critic", schema=REVIEW_SCHEMA)
+        system = CRITIC_SYSTEM + (CRITIC_EVIDENCE_NOTE if any(s.evidence for s in stories) else "")
+        data = self.critic.json(system, user, stage="critic", schema=REVIEW_SCHEMA)
         issues = []
         for code, key in (("intro_problem", "intro"), ("outro_problem", "outro")):
             claims = [c for c in data.get(key, []) if c]
@@ -308,9 +332,11 @@ class CriticWriter:
             if issue.code in ("missing_intro", "intro_problem"):
                 log.warning("      the intro still has a problem (%s); using the standard intro", issue.detail)
                 segments[0] = self.template.intro(len(stories))
+                self.report["fallbacks"].append({"part": "intro", "why": issue.detail})
             elif issue.code in ("missing_outro", "outro_problem"):
                 log.warning("      the outro still has a problem (%s); using the standard outro", issue.detail)
                 segments[-1] = self.template.outro()
+                self.report["fallbacks"].append({"part": "outro", "why": issue.detail})
             elif issue.index is None:
                 continue
             elif issue.code == "too_long":
@@ -320,9 +346,11 @@ class CriticWriter:
                 log.warning("      story %d still has a problem (%s); using its summary instead",
                             issue.index + 1, issue.detail)
                 segments[issue.index + 1] = template_segment(stories[issue.index])
+                self.report["fallbacks"].append({"part": f"story {issue.index + 1}", "why": issue.detail})
         episode = replace(episode, segments=segments)
         if not episode.title or unsupported_numbers(episode.title, episode_material(stories, self.frame())):
             episode.title = self.template.write(stories).title
+            self.report["fallbacks"].append({"part": "title", "why": "missing or has unsupported numbers"})
         return trim_to_fit(episode, TARGET_MAX_SECONDS)
 
     def shorten(self, episode: Episode, stories: list[Story], seconds_over: float) -> Episode:

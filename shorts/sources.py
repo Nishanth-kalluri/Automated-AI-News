@@ -71,6 +71,23 @@ class RSSSource:
         return stories
 
 
+def hn_search(query: str, since: datetime, min_points: int = 0, hits: int = 30) -> list[dict]:
+    """Hacker News stories matching ``query`` since ``since``, via the public Algolia API. Raises on errors."""
+    resp = requests.get(
+        "https://hn.algolia.com/api/v1/search",
+        params={
+            "query": query,
+            "tags": "story",
+            "numericFilters": f"created_at_i>{int(since.timestamp())},points>{min_points}",
+            "hitsPerPage": hits,
+        },
+        headers=UA,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json().get("hits", [])
+
+
 class HackerNewsSource:
     """AI-related HN stories with some traction, via the public Algolia API."""
 
@@ -82,26 +99,15 @@ class HackerNewsSource:
         self.min_points = min_points
 
     def fetch(self) -> list[Story]:
-        since = int((datetime.now(timezone.utc) - timedelta(hours=self.max_age_hours)).timestamp())
+        since = datetime.now(timezone.utc) - timedelta(hours=self.max_age_hours)
         seen: dict[str, Story] = {}
         for q in self.QUERIES:
             try:
-                resp = requests.get(
-                    "https://hn.algolia.com/api/v1/search",
-                    params={
-                        "query": q,
-                        "tags": "story",
-                        "numericFilters": f"created_at_i>{since},points>{self.min_points}",
-                        "hitsPerPage": 30,
-                    },
-                    headers=UA,
-                    timeout=15,
-                )
-                resp.raise_for_status()
+                hits = hn_search(q, since, self.min_points)
             except Exception as exc:
                 log.warning("hackernews: query %r failed: %s", q, exc)
                 continue
-            for h in resp.json().get("hits", []):
+            for h in hits:
                 url = h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}"
                 seen.setdefault(
                     url,

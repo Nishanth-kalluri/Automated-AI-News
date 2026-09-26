@@ -2,7 +2,9 @@
 
 ``LLMEditor`` reads the newsletter issues plus feed headlines, merges coverage of the same
 story, and picks the most important ones. ``HeuristicEditor`` is the no-key fallback that
-scores feed headlines on AI relevance, freshness and popularity.
+scores feed headlines on AI relevance, freshness and popularity. With web tools
+(``SHORTS_WEB=on``) the editor also sees how widely the top headlines are covered, can search
+the web for a pick's primary source, and names a few alternates for the researchers' swaps.
 """
 from __future__ import annotations
 
@@ -13,11 +15,16 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlsplit
 
 from .checks import check_picks, fatal, norm_url, same_event, similar
-from .llm import LLM, BudgetExceeded, Tool, strict_object
+from .llm import LLM, BudgetExceeded, Tool, capped, strict_object
 from .models import Story
+
+if TYPE_CHECKING:
+    from .coverage import Coverage
+    from .web import Tavily
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +36,10 @@ AI_TERMS = {
     "benchmark": 0.4, "open-weight": 0.8, "open source": 0.4, "regulation": 0.4,
 }
 MAX_HEADLINES_FOR_LLM = 80
+COVERAGE_IN_PROMPT = 10  # top feed headlines shown with their coverage
+MAX_COVERAGE_CALLS = 10
+MAX_EDITOR_SEARCHES = 3
+MAX_ALTERNATES = 3
 
 
 def _norm(title: str) -> str:
@@ -151,13 +162,23 @@ PICK_SCHEMA = strict_object({
     "why": {"type": "string"},
 })
 EDITOR_SCHEMA = strict_object({"stories": {"type": "array", "items": PICK_SCHEMA}})
+EDITOR_WEB_SCHEMA = strict_object({"stories": {"type": "array", "items": PICK_SCHEMA},
+                                   "alternates": {"type": "array", "items": PICK_SCHEMA}})
+
+
+def _coverage_note(row: dict | None) -> str:
+    if not row or (row.get("hn_points") is None and row.get("news_outlets") is None):
+        return " | coverage unknown"
+    from .coverage import Coverage
+
+    return f" | coverage: {Coverage.line(row)}"
 
 
 class LLMEditor:
     name = "llm"
 
-    def __init__(self, llm: LLM, max_age_hours: float):
-        self.llm, self.max_age_hours = llm, max_age_hours
+    def __init__(self, llm: LLM, max_age_hours: float, coverage: Coverage | None = None):
+        self.llm, self.max_age_hours, self.coverage = llm, max_age_hours, coverage
 
     def _prompt(self, candidates: list[Story], n: int, seen: SeenStore) -> str:
         newsletters = [s for s in candidates if s.kind == "newsletter"]
@@ -169,26 +190,47 @@ class LLMEditor:
         for i, s in enumerate(newsletters, 1):
             parts.append(f"=== NEWSLETTER {i}: {s.source} | {s.title} | {s.published:%Y-%m-%d %H:%M} UTC ===\n{s.body}\n")
         if articles:
-            parts.append("=== FEED HEADLINES (source | published | title | url | snippet) ===")
+            notes = self._coverage_notes(articles)
+            parts.append("=== FEED HEADLINES (source | published | title | url | snippet"
+                         f"{' | coverage' if notes else ''}) ===")
             parts += [f"- {s.source} | {s.published:%m-%d %H:%M} | {s.title} | {s.url} | {s.summary[:200]}"
-                      for s in articles]
+                      f"{notes.get(id(s), '')}" for s in articles]
         recent = seen.recent_headlines()
         if recent:
             parts.append("\n=== ALREADY COVERED IN RECENT EPISODES ===")
             parts += [f"- {h}" for h in recent]
         return "\n".join(parts)
 
+    def _coverage_notes(self, articles: list[Story]) -> dict[int, str]:
+        """Coverage for the top feed headlines (one per event), keyed by id(story); {} without coverage."""
+        if self.coverage is None:
+            return {}
+        top: list[Story] = []
+        for s in articles:
+            if not any(same_event(s.title, t.title) for t in top):
+                top.append(s)
+            if len(top) == COVERAGE_IN_PROMPT:
+                break
+        try:
+            rows = self.coverage.lookup_many([s.title for s in top], timeout=30)
+        except Exception as exc:  # the editor still has the newsletters and headlines
+            log.warning("      coverage lookup failed (%s)", exc)
+            rows = {}
+        return {id(s): _coverage_note(rows.get(s.title)) for s in top}
+
     def pick(self, candidates: list[Story], n: int, seen: SeenStore) -> list[Story]:
-        data = self.llm.json(EDITOR_SYSTEM, self._prompt(candidates, n, seen), stage="editor", schema=EDITOR_SCHEMA)
+        system = EDITOR_SYSTEM + (COVERAGE_NOTE if self.coverage is not None else "")
+        data = self.llm.json(system, self._prompt(candidates, n, seen), stage="editor", schema=EDITOR_SCHEMA)
         return self.to_stories(data, candidates, n)
 
     @staticmethod
-    def to_stories(data: dict, candidates: list[Story], n: int) -> list[Story]:
-        """Editor JSON -> Stories. A link that matches a feed article takes its date and publisher."""
+    def to_stories(data: dict, candidates: list[Story], n: int, quiet: bool = False) -> list[Story]:
+        """Editor JSON -> Stories. A link that matches a feed article or a web search hit takes its
+        date and publisher."""
         now = datetime.now(timezone.utc)
-        articles = {norm_url(c.url): c for c in candidates if c.kind == "article" and c.url}
+        articles = {norm_url(c.url): c for c in candidates if c.kind in ("article", "web") and c.url}
         picked = []
-        for item in data.get("stories", [])[:n]:
+        for item in (data.get("stories") or [])[:n]:
             outlets = [o for o in item.get("outlets", []) if o] or ["AI newsletters"]
             url = (item.get("url") or "").strip()
             match = articles.get(norm_url(url))
@@ -206,7 +248,7 @@ class LLMEditor:
                 outlets=outlets,
             ))
         picked = [s for s in picked if s.headline and s.summary]
-        if len(picked) < n:
+        if len(picked) < n and not quiet:
             log.warning("editor returned %d of %d stories", len(picked), n)
         return picked
 
@@ -217,6 +259,26 @@ You have two tools. Use them before you answer; a few calls are enough.
 - search_candidates(query): searches today's newsletters and feeds. Use it to find every outlet that covered an
   event (more outlets means a bigger story) and the best link for it. A link must come from today's material.
 - aired_lookup(headline): checks whether a story already aired in the last two weeks."""
+
+COVERAGE_NOTE = """
+
+The top feed headlines show how widely each event is covered right now: Hacker News points and how many
+outlets Google News lists in the last 2 days. Unknown means unknown, not low. Use it to rank stories of
+similar importance and to spot the day's big stories; never drop an important launch or paper because its
+coverage is low or unknown."""
+
+COVERAGE_TOOL_NOTE = """
+- coverage(headline): the same coverage numbers for any event (null means unknown), at most 10 calls."""
+
+SEARCH_TOOL_NOTE = """
+- web_search(query), at most 3 calls: only to find the primary source (the company's post, the paper) of a
+  pick without a good link. Its result links count as today's material, and a link's date becomes the
+  story's date, so never use a source published before the stories you are covering."""
+
+ALTERNATES_NOTE = """
+
+Also return "alternates": up to 3 next-best stories in the same format, each a different event from your
+picks. They are used only if a researcher finds that a pick is wrong, stale or thin."""
 
 REPAIR_PROMPT = """
 
@@ -266,28 +328,71 @@ class AgentEditor:
 
     name = "agent"
 
-    def __init__(self, llm: LLM, max_age_hours: float, max_repairs: int = 2):
+    def __init__(self, llm: LLM, max_age_hours: float, max_repairs: int = 2, *,
+                 coverage: Coverage | None = None, tavily: Tavily | None = None):
         self.llm, self.max_age_hours, self.max_repairs = llm, max_age_hours, max_repairs
-        self.base = LLMEditor(llm, max_age_hours)
+        self.coverage, self.tavily = coverage, tavily
+        self.web = coverage is not None or tavily is not None
+        self.base = LLMEditor(llm, max_age_hours, coverage)
+        self.alternates: list[Story] = []  # next-best picks, for the researchers' swaps
 
     def _tools(self, candidates: list[Story], seen: SeenStore) -> list[Tool]:
         query = strict_object({"query": {"type": "string", "description": "a few keywords, e.g. a company and product"}})
         headline = strict_object({"headline": {"type": "string"}})
-        return [
+        tools = [
             Tool("search_candidates", "Search today's newsletters and feed stories for an event.", query,
                  lambda query: candidate_search(candidates, query)),
             Tool("aired_lookup", "Check whether a similar story aired in the last two weeks.", headline,
                  lambda headline: aired_search(seen, headline)),
         ]
+        if self.coverage is not None:
+            tools += capped([Tool("coverage", "How widely an event is covered right now (null means unknown).",
+                                  headline, lambda headline: self.coverage.lookup(headline))], MAX_COVERAGE_CALLS)
+        if self.tavily is not None and self.tavily.usable:
+            tools += capped([Tool("web_search", "Search the web (past week) for a pick's primary source or "
+                                  "first-report date.", query, lambda query: self._search(candidates, query))],
+                            MAX_EDITOR_SEARCHES)
+        return tools
+
+    def _search(self, candidates: list[Story], query: str) -> str:
+        """A Tavily search whose hits join today's material, so a primary link found here passes the checks."""
+        from .web import WebUnavailable
+
+        try:
+            docs = self.tavily.search(query, 5)
+        except WebUnavailable as exc:
+            return f"error: {exc}"
+        now = datetime.now(timezone.utc)
+        known = {norm_url(c.url) for c in candidates if c.url}
+        rows = []
+        for i, d in enumerate(docs, 1):
+            if norm_url(d.url) not in known:
+                known.add(norm_url(d.url))
+                candidates.append(Story(title=d.title or d.url, url=d.url, source=_domain(d.url),
+                                        published=_published(d.published, now), summary=d.snippet, kind="web"))
+            rows.append(f"{i}. {d.title} | {d.url} | {d.published or 'date unknown'}\n   {d.snippet}")
+        return "\n".join(rows) or "no results"
 
     def pick(self, candidates: list[Story], n: int, seen: SeenStore) -> list[Story]:
         prompt = self.base._prompt(candidates, n, seen)
+        schema = EDITOR_WEB_SCHEMA if self.web else EDITOR_SCHEMA
+        coverage_note = COVERAGE_NOTE if self.coverage is not None else ""
+        alternates_note = ALTERNATES_NOTE if self.web else ""
         if hasattr(self.llm, "run_tools"):
-            data = self.llm.run_tools(EDITOR_SYSTEM + AGENT_TOOLS_NOTE, prompt, self._tools(candidates, seen),
-                                      stage="editor", schema=EDITOR_SCHEMA, max_turns=4)
+            tools = self._tools(candidates, seen)
+            names = {t.name for t in tools}
+            tools_note = AGENT_TOOLS_NOTE if len(tools) == 2 else AGENT_TOOLS_NOTE.replace("two tools", "these tools")
+            system = (EDITOR_SYSTEM + coverage_note + tools_note
+                      + (COVERAGE_TOOL_NOTE if "coverage" in names else "")
+                      + (SEARCH_TOOL_NOTE if "web_search" in names else "") + alternates_note)
+            data = self.llm.run_tools(system, prompt, tools, stage="editor", schema=schema, max_turns=4)
         else:
-            data = self.llm.json(EDITOR_SYSTEM, prompt, stage="editor", schema=EDITOR_SCHEMA)
+            data = self.llm.json(EDITOR_SYSTEM + coverage_note + alternates_note, prompt, stage="editor",
+                                 schema=schema)
         picks = LLMEditor.to_stories(data, candidates, n)
+        if self.web:
+            self.alternates = LLMEditor.to_stories({"stories": data.get("alternates") or []}, candidates,
+                                                   MAX_ALTERNATES, quiet=True)
         for round_no in range(1, self.max_repairs + 1):
             issues = fatal(check_picks(picks, candidates, n, seen.urls, seen.recent_headlines(SeenStore.KEEP_DAYS),
                                        self.max_age_hours))
@@ -299,8 +404,8 @@ class AgentEditor:
             repair = REPAIR_PROMPT.format(picks=json.dumps(rows, indent=1), n=n,
                                           problems="\n".join(i.line() for i in issues))
             try:
-                data = self.llm.json(EDITOR_SYSTEM, prompt + repair, stage=f"editor-repair-{round_no}",
-                                     schema=EDITOR_SCHEMA)
+                data = self.llm.json(EDITOR_SYSTEM + coverage_note, prompt + repair,
+                                     stage=f"editor-repair-{round_no}", schema=EDITOR_SCHEMA)
                 picks = LLMEditor.to_stories(data, candidates, n) or picks
             except BudgetExceeded as exc:
                 log.warning("      %s", exc)
@@ -311,10 +416,27 @@ class AgentEditor:
         return picks
 
 
-def build_editor(llm: LLM | None, max_age_hours: float, agents: bool = False, max_repairs: int = 2) -> Editor:
+def _domain(url: str) -> str:
+    host = urlsplit(url).hostname or ""
+    return host.removeprefix("www.") or "web"
+
+
+def _published(day: str, now: datetime) -> datetime:
+    """A search hit's date (YYYY-MM-DD) as the end of that day, capped at now; now if unknown."""
+    try:
+        end = datetime.fromisoformat(day[:10]).replace(hour=23, minute=59, tzinfo=timezone.utc)
+    except ValueError:
+        return now
+    return min(end, now)
+
+
+def build_editor(llm: LLM | None, max_age_hours: float, agents: bool = False, max_repairs: int = 2, *,
+                 coverage: Coverage | None = None, tavily: Tavily | None = None) -> Editor:
     if not llm:
         return HeuristicEditor(max_age_hours)
-    return AgentEditor(llm, max_age_hours, max_repairs) if agents else LLMEditor(llm, max_age_hours)
+    if agents:
+        return AgentEditor(llm, max_age_hours, max_repairs, coverage=coverage, tavily=tavily)
+    return LLMEditor(llm, max_age_hours, coverage)
 
 
 def settle(picks: list[Story], candidates: list[Story], n: int, seen: SeenStore,
