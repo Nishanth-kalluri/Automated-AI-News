@@ -1,0 +1,73 @@
+name: Daily AI Short
+
+on:
+  schedule:
+    - cron: "0 13 * * *"  # 13:00 UTC every day
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to YouTube (needs SHORTS_UPLOADER=youtube and the YouTube secrets)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # to save state (already-aired stories) on the `state` branch
+
+concurrency:
+  group: daily-short
+  cancel-in-progress: false
+
+jobs:
+  make-short:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+      - run: pip install ".[all]"
+
+      # Stories that already aired live on the `state` branch so videos don't repeat.
+      - name: Load state
+        run: |
+          mkdir -p state
+          if git fetch --depth 1 origin state 2>/dev/null; then
+            git archive FETCH_HEAD | tar -x -C state
+          fi
+
+      - name: Make the episode
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
+          AGENTMAIL_INBOX: ${{ vars.AGENTMAIL_INBOX }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SHORTS_LLM_MODEL: ${{ vars.SHORTS_LLM_MODEL }}
+          SHORTS_NOTIFY_EMAIL: ${{ vars.SHORTS_NOTIFY_EMAIL }}
+          SHORTS_UPLOADER: ${{ vars.SHORTS_UPLOADER || 'local' }}
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          UPLOAD: ${{ github.event_name == 'schedule' || inputs.upload }}
+        run: python -m shorts run $([ "$UPLOAD" = "true" ] && echo --upload)
+
+      - name: Save state
+        run: |
+          cd state
+          git init -q -b state
+          git add -A
+          git -c user.name="github-actions" -c user.email="github-actions@users.noreply.github.com" \
+            commit -qm "state after run ${{ github.run_id }}"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" state
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: episode
+          path: |
+            output/*/short.mp4
+            output/*/*.json
+            output/*/captions.ass
+          if-no-files-found: ignore

@@ -1,0 +1,32 @@
+[project]
+name = "ai-shorts"
+version = "0.2.0"
+description = "Turn the latest AI news into YouTube Shorts, end to end."
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+  "feedparser>=6.0",
+  "pillow>=10.0",
+  "imageio-ffmpeg>=0.5",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+llm = ["openai>=1.50", "anthropic>=0.40"]
+tts = ["edge-tts>=6.1"]
+youtube = ["google-api-python-client>=2.100", "google-auth-oauthlib>=1.1"]
+all = ["ai-shorts[llm,tts,youtube]"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+shorts = "shorts.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["shorts"]
+
+[tool.setuptools.package-data]
+shorts = ["persona.md"]
