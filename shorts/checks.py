@@ -105,6 +105,14 @@ def similar(a: str, b: str) -> float:
     return len(wa & wb) / len(wa | wb) if wa and wb else 0.0
 
 
+def _amount(word: str) -> float:
+    """An event word's value; 0 for words that only start with a digit, like "2nm", "4o" or "10x"."""
+    try:
+        return float(word)
+    except ValueError:
+        return 0.0
+
+
 def same_event(a: str, b: str) -> bool:
     """Whether two headlines are about the same event.
 
@@ -124,7 +132,7 @@ def same_event(a: str, b: str) -> bool:
     if shared in (wa, wb) or len(shared) / len(wa | wb) >= 0.75:
         return True
     # "Anthropic raises $13B at $183B valuation" / "Anthropic raises $13 billion Series F, valued at $183 billion"
-    same_amount = any(w[0].isdigit() and float(w) >= 10 for w in shared)
+    same_amount = any(w[0].isdigit() and _amount(w) >= 10 for w in shared)
     return same_amount and len(shared) / min(len(wa), len(wb)) >= 0.75
 
 

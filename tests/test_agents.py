@@ -115,6 +115,10 @@ def test_same_event_compares_names_and_numbers_not_headline_shape():
     aired = ["OpenAI raises 40 billion dollars", "xAI raises $20 billion"]
     issues = [(i.code, i.index) for i in check_picks(picks, picks, 4, set(), aired, 30) if i.fatal]
     assert issues == [("already_aired", 3)]
+    # words that start with a digit but aren't amounts ("2nm", "4o", "10x") don't break the check
+    assert not same_event("TSMC starts 2nm chip production for Nvidia", "Apple books most of TSMC 2nm capacity for AI chips")
+    assert not same_event("OpenAI retires GPT-4o voice in ChatGPT", "Microsoft moves Copilot off GPT-4o voice")
+    assert not same_event("Nvidia Rubin is 10x faster at inference", "AMD claims 10x faster inference with MI500 chips")
 
 
 def test_unparseable_links_in_newsletters_are_ignored():
