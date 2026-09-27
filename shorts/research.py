@@ -22,7 +22,7 @@ from typing import Protocol
 
 import requests
 
-from .checks import _URL_RE, _event_words, norm_url
+from .checks import _URL_RE, _event_words, norm_url, same_event
 from .config import Config
 from .llm import LLM, Tool, capped, strict_object
 from .models import Evidence, Story
@@ -343,6 +343,8 @@ class AgentResearcher:
     def verify(self, story: Story, data: dict, pool: dict[str, Doc]) -> Finding:
         f = Finding(matches=data.get("matches_pick") if data.get("matches_pick") in ("yes", "partly", "no")
                     else "unknown", note=str(data.get("note") or "")[:300])
+        if f.matches == "no":  # the pick's own link is about something else: nothing it says counts
+            pool = {k: d for k, d in pool.items() if k != norm_url(story.url)}
         pick_words = _event_words(story.headline or story.title)
         need = min(2, len(pick_words))
         relevant: dict[str, bool] = {}
@@ -377,6 +379,7 @@ class AgentResearcher:
         f.first_reported = self._backed_date(str(data.get("first_reported") or ""), pool)
         if f.matches == "no" and not f.url:
             f.status = "wrong_story"
+            f.evidence, f.first_reported = [], ""
         elif f.first_reported and (self.today - date.fromisoformat(f.first_reported)).days > \
                 math.ceil(self.max_age_hours / 24) + 1:
             f.status = "stale"
@@ -440,6 +443,15 @@ def research(researcher: Researcher, stories: list[Story]) -> None:
         log.warning("%s research failed (%s); writing from summaries only", researcher.name, exc)
 
 
+def _better(alt: Story, pick: Story) -> bool:
+    """Whether a researched replacement should air instead of a failing pick: a verified one always;
+    for a pick with the wrong link or old news, anything not itself wrong or old. A thin pick still
+    has its article, so an unresearched replacement is no better."""
+    if alt.checked == "verified":
+        return True
+    return pick.checked in ("wrong_story", "stale") and alt.checked in ("thin", "failed", "")
+
+
 def swap_failing(researcher: Researcher, stories: list[Story], bench: list[Story], settle_fn,
                  max_swaps: int = MAX_SWAPS) -> list[Story]:
     """Replace up to ``max_swaps`` stories the researchers found wrong, stale or thin with the best
@@ -452,6 +464,11 @@ def swap_failing(researcher: Researcher, stories: list[Story], bench: list[Story
                      key=lambda i: RANK[stories[i].checked])[:max_swaps]
     if not failing:
         return stories
+
+    def repeats(a: Story, b: Story) -> bool:
+        return bool(norm_url(a.url)) and norm_url(a.url) == norm_url(b.url) or \
+            same_event(a.headline or a.title, b.headline or b.title)
+
     chosen: dict[int, Story] = {}  # slot -> a researched copy of the bench story
     used: list[Story] = []  # bench stories already taken, so each fills one slot at most
     for i in failing:
@@ -460,6 +477,10 @@ def swap_failing(researcher: Researcher, stories: list[Story], bench: list[Story
             if any(alt is u for u in used) or any(alt is s for s in stories):
                 continue
             trial = copy.deepcopy(alt)
+            # Not a repeat of any pick (its own slot's included: a stale story can't replace itself),
+            # since a slot whose replacement researches worse keeps its original.
+            if any(repeats(trial, s) for s in [*stories, *chosen.values()]):
+                continue
             # Copies of the kept picks: settle drops links it doesn't know, like a researcher's source.
             if any(x is trial for x in settle_fn([copy.copy(o) for o in others] + [trial])):
                 chosen[i] = trial
@@ -470,14 +491,14 @@ def swap_failing(researcher: Researcher, stories: list[Story], bench: list[Story
     kept, added = [], []
     for i, s in enumerate(stories):
         alt = chosen.get(i)
-        if alt is not None and RANK.get(alt.checked, 3) > RANK[s.checked]:
+        if alt is not None and _better(alt, s):
             log.info("      swapping %r (%s) for %r (%s)", s.headline or s.title, s.checked,
                      alt.headline or alt.title, alt.checked)
             added.append(alt)
             continue
         if s.checked == "wrong_story":  # the link is about something else: write from the summary
             log.warning("      %r: its link is about another story; dropping the link", s.headline or s.title)
-            s.url, s.body = "", ""
+            s.url, s.body, s.evidence, s.first_reported = "", "", [], ""
         kept.append(s)
     return kept + added
 

@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 TAVILY_API = "https://api.tavily.com"
 JINA_READER = "https://r.jina.ai/"
 READ_CHARS = 6000
+BATCH_TIMEOUT = 90  # seconds for a Tavily extract of several links, as before phase 2
 UA = {"User-Agent": "ai-shorts/0.4 (+https://github.com/Nishanth-kalluri/Automated-AI-News)"}
 JUNK_MARKERS = ("subscribe to continue", "sign in to read", "enable javascript", "access denied",
                 "are you a robot", "captcha", "target url returned error")
@@ -164,7 +165,8 @@ class Tavily:
             self._off(f"{reason}, twice in a row")
         return WebUnavailable(f"Tavily: {reason}")
 
-    def _post(self, path: str, payload: dict, minimal: tuple[str, ...], credits: int) -> dict:
+    def _post(self, path: str, payload: dict, minimal: tuple[str, ...], credits: int,
+              timeout: float | None = None) -> dict:
         if not self.api_key:
             raise WebUnavailable("no Tavily key")
         if self.disabled:
@@ -176,7 +178,7 @@ class Tavily:
         body = {k: v for k, v in payload.items() if k in minimal} if self.minimal else payload
         for _ in range(2):
             try:
-                resp = requests.post(f"{TAVILY_API}/{path}", json=body, timeout=self.timeout,
+                resp = requests.post(f"{TAVILY_API}/{path}", json=body, timeout=timeout or self.timeout,
                                      headers={"Authorization": f"Bearer {self.api_key}"})
             except requests.RequestException as exc:
                 raise self._failed(type(exc).__name__) from None
@@ -225,7 +227,8 @@ class Tavily:
         if not urls:
             return {}
         data = self._post("extract", {"urls": urls, "extract_depth": "basic", "format": "text"},
-                          self.EXTRACT_MINIMAL, math.ceil(len(urls) / 5))
+                          self.EXTRACT_MINIMAL, math.ceil(len(urls) / 5),
+                          timeout=self.timeout if len(urls) == 1 else max(self.timeout, BATCH_TIMEOUT))
         out = {}
         for r in data.get("results") or []:
             if isinstance(r, dict) and r.get("url") and r.get("raw_content"):
@@ -311,23 +314,20 @@ def normalize(text: str) -> str:
 
 
 def quote_in(quote: str, text: str) -> bool:
-    """Whether ``quote`` appears in ``text``. A quote with "..." must have every part of 4 or more
-    words there, in order."""
+    """Whether ``quote`` appears in ``text`` as whole words ("5 million" is not in "25 million").
+    A quote with "..." must have every part there, in order, and at least one part of 4 or more
+    words, so a short made-up part ("... $30,000 each ...") can't ride along."""
     q, t = normalize(quote), normalize(text)
-    if not q or not t:
-        return False
     parts = [p.strip(" ,;:") for p in re.split(r"\.\.\.|…", q)]
-    if len(parts) == 1:
-        return len(q.split()) >= 4 and q in t
-    parts = [p for p in parts if len(p.split()) >= 4]
-    if not parts:
+    parts = [p for p in parts if p]
+    if not t or not any(len(p.split()) >= 4 for p in parts):
         return False
     pos = 0
     for p in parts:
-        found = t.find(p, pos)
-        if found < 0:
+        found = re.compile(rf"(?<!\w){re.escape(p)}(?!\w)").search(t, pos)
+        if found is None:
             return False
-        pos = found + len(p)
+        pos = found.end()
     return True
 
 

@@ -336,6 +336,31 @@ def test_build_editor_passes_the_web_tools_through():
 
 # --- writer and critic with evidence -------------------------------------------------------
 
+def test_parallel_calls_hold_their_estimate_so_they_cannot_all_pass_on_one_total():
+    from shorts.llm import call_estimate
+
+    usage = Usage(run_cap_usd=0.60)
+    usage.add("editor", "gpt-5", 0, 35_000)  # $0.35
+    each = call_estimate("gpt-5", 8000, 2000)  # $0.03
+    usage.hold("research", each, reserve_usd=0.20)
+    with pytest.raises(BudgetExceeded):  # $0.35 + $0.03 held + $0.03 + $0.20 reserve > $0.60
+        usage.hold("research", each, reserve_usd=0.20)
+    usage.release(each)
+    usage.hold("research", each, reserve_usd=0.20)
+    usage.release(each)
+    usage.check("writer")  # nothing held once the calls are back
+
+
+def test_worker_calls_hold_while_running_and_release_after(monkeypatch):
+    seen = []
+    llm, fake = _openai(_resp("{}"), model="gpt-5")
+    worker = llm.worker()
+    fake.create = lambda **kw: seen.append(worker.usage._held_usd) or _resp("{}")
+    worker.json("s", "u", stage="research-1")
+    assert seen and seen[0] > 0 and worker.usage._held_usd == 0
+    llm.json("s", "u", stage="writer")
+    assert seen[-1] == 0  # the main copy holds nothing
+
 def _researched():
     a, b = _stories()
     a.body = "ARTICLE BODY that the writer must not see."

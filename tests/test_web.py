@@ -408,6 +408,15 @@ def test_tavily_extract_cost(monkeypatch, tmp_path, count, charged, sent):
     assert tavily.credits.run_used == charged and len(fake.calls[0].json["urls"]) == sent
 
 
+def test_a_batched_extract_waits_as_long_as_before_and_one_link_does_not(monkeypatch, tmp_path):
+    tavily, fake = _tavily(monkeypatch, tmp_path, _http(200, {"results": []}), _http(200, {"results": []}),
+                           _http(200, {"results": []}))
+    tavily.extract([f"https://news.example/{i}" for i in range(8)])
+    tavily.extract(["https://news.example/one"])
+    tavily.search("rubin")
+    assert [c.timeout for c in fake.calls] == [90, 20, 20]
+
+
 def test_tavily_extract_of_no_links_makes_no_call(monkeypatch, tmp_path):
     tavily, fake = _tavily(monkeypatch, tmp_path)
     assert tavily.extract([]) == {} and tavily.extract(["mailto:x@example.com", ""]) == {}
@@ -584,7 +593,9 @@ def test_quote_in_matches_across_typography_and_markdown():
 def test_quote_in_needs_every_part_in_order():
     assert quote_in("OpenAI said on Thursday ... it will be available to all ChatGPT users", TEXT)
     assert quote_in("OpenAI said on Thursday… pricing stays the same", TEXT)
-    assert quote_in("Wow ... the model is twice as fast", TEXT)  # parts under 4 words are not checked
+    assert quote_in("OpenAI said on Thursday ... GPT-6 ... scored 93.4%", TEXT)  # short parts are checked too
+    assert not quote_in("Wow ... the model is twice as fast", TEXT)
+    assert not quote_in("OpenAI said on Thursday ... $30,000 each ... pricing stays the same", TEXT)
     assert not quote_in("it will be available to all ChatGPT users ... OpenAI said on Thursday", TEXT)
     assert not quote_in("OpenAI said on Thursday ... it will be free for everyone forever", TEXT)
     assert not quote_in("OpenAI said ... it will ...", TEXT)  # no part long enough to check
@@ -595,6 +606,8 @@ def test_quote_in_rejects_paraphrases_and_short_quotes():
     assert not quote_in("the model is available to every ChatGPT user", TEXT)
     assert not quote_in("twice as fast", TEXT)
     assert quote_in("twice as fast as", TEXT)
+    assert not quote_in("5 million users in the first week", "It had 25 million users in the first week.")
+    assert quote_in("25 million users in the first week", "It had 25 million users in the first week.")
     assert not quote_in("", TEXT) and not quote_in("the model is twice as fast", "")
 
 

@@ -40,6 +40,9 @@ UNKNOWN_PRICE = (10.00, 1.00, 50.00)  # the top of the regular tiers
 PRO_PRICE = (150.00, 15.00, 600.00)  # "pro" tiers cost many times their base model
 _warned_prices: set[str] = set()
 TOOL_OUTPUT_MAX_CHARS = 8000
+# What one parallel worker call (a researcher turn) is assumed to use, input and output tokens,
+# held against the caps while it runs.
+WORKER_CALL_TOKENS = (8000, 2000)
 
 
 class BudgetExceeded(RuntimeError):
@@ -58,6 +61,11 @@ def price(model: str) -> tuple[float, float, float]:
     return fallback
 
 
+def call_estimate(model: str, input_tokens: int, output_tokens: int) -> float:
+    p_in, _, p_out = price(model)
+    return (input_tokens * p_in + output_tokens * p_out) / 1e6
+
+
 @dataclass
 class Usage:
     """Tokens and dollars per call, written to cost.json, with the run's spending caps."""
@@ -69,6 +77,7 @@ class Usage:
     # Called with each call's dollars as it happens, so the ledger is saved even if the run is killed.
     on_add: Callable[[float], None] | None = field(default=None, repr=False, compare=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)  # researchers run in threads
+    _held_usd: float = field(default=0.0, repr=False, compare=False)  # estimates for calls still running
 
     def add(self, stage: str, model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> None:
         p_in, p_cached, p_out = price(model)
@@ -86,15 +95,29 @@ class Usage:
 
     def over_budget(self, reserve_usd: float = 0.0) -> bool:
         """``reserve_usd`` keeps that much of both caps back for later stages (the researchers leave
-        room for the writer)."""
-        spent = self.total_usd + reserve_usd
+        room for the writer). Calls still running count at their estimate."""
+        with self._lock:
+            spent = sum(c["usd"] for c in self.calls) + self._held_usd + reserve_usd
         return spent >= self.run_cap_usd or self.month_spent_usd + spent >= self.month_cap_usd
 
     def check(self, stage: str, reserve_usd: float = 0.0) -> None:
-        if self.over_budget(reserve_usd):
-            held = f", keeping ${reserve_usd:.2f} for later stages" if reserve_usd else ""
-            raise BudgetExceeded(f"{stage}: spending cap reached (${self.total_usd:.2f} this run, "
-                                 f"${self.month_spent_usd + self.total_usd:.2f} this month{held})")
+        self.hold(stage, 0.0, reserve_usd)
+
+    def hold(self, stage: str, estimate_usd: float, reserve_usd: float = 0.0) -> None:
+        """Check the caps, counting calls still running, and hold ``estimate_usd`` for this call until
+        ``release``. Parallel callers can't all pass on the same total."""
+        with self._lock:
+            total = sum(c["usd"] for c in self.calls)
+            spent = total + self._held_usd + estimate_usd + reserve_usd
+            if spent >= self.run_cap_usd or self.month_spent_usd + spent >= self.month_cap_usd:
+                held = f", keeping ${reserve_usd:.2f} for later stages" if reserve_usd else ""
+                raise BudgetExceeded(f"{stage}: spending cap reached (${total:.2f} this run, "
+                                     f"${self.month_spent_usd + total:.2f} this month{held})")
+            self._held_usd += estimate_usd
+
+    def release(self, estimate_usd: float) -> None:
+        with self._lock:
+            self._held_usd = max(self._held_usd - estimate_usd, 0.0)
 
 
 class SpendLedger:
@@ -209,6 +232,7 @@ class OpenAILLM:
         self.client, self.model, self.usage = client, model, usage
         self.fallback_model = fallback_model if fallback_model != model else ""
         self.reserve_usd = 0.0  # budget this instance leaves for later stages
+        self.hold_tokens: tuple[int, int] | None = None  # set on worker copies
 
     def with_model(self, model: str) -> "OpenAILLM":
         return OpenAILLM("", model, self.usage, fallback_model=self.model, client=self.client)
@@ -220,24 +244,29 @@ class OpenAILLM:
             client = client.with_options(timeout=timeout, max_retries=max_retries)
         clone = OpenAILLM("", self.model, self.usage, fallback_model=self.fallback_model, client=client)
         clone.reserve_usd = reserve_usd
+        clone.hold_tokens = WORKER_CALL_TOKENS  # parallel calls hold their likely cost while running
         return clone
 
     def _create(self, stage: str, **kwargs):
         """One Responses API call, priced and recorded. Falls back once if the model isn't available."""
-        self.usage.check(stage, self.reserve_usd)
+        estimate = call_estimate(self.model, *self.hold_tokens) if self.hold_tokens else 0.0
+        self.usage.hold(stage, estimate, self.reserve_usd)
         try:
-            resp = self.client.responses.create(model=self.model, **kwargs)
-        except Exception as exc:
-            if not (self.fallback_model and _is_model_error(exc)):
-                raise
-            log.warning("%s: model %s unavailable (%s); using %s", stage, self.model, exc, self.fallback_model)
-            self.model, self.fallback_model = self.fallback_model, ""
-            resp = self.client.responses.create(model=self.model, **kwargs)
-        u = getattr(resp, "usage", None)
-        if u is not None:
-            details = getattr(u, "input_tokens_details", None)
-            cached = getattr(details, "cached_tokens", 0) or 0
-            self.usage.add(stage, self.model, u.input_tokens, u.output_tokens, cached)
+            try:
+                resp = self.client.responses.create(model=self.model, **kwargs)
+            except Exception as exc:
+                if not (self.fallback_model and _is_model_error(exc)):
+                    raise
+                log.warning("%s: model %s unavailable (%s); using %s", stage, self.model, exc, self.fallback_model)
+                self.model, self.fallback_model = self.fallback_model, ""
+                resp = self.client.responses.create(model=self.model, **kwargs)
+            u = getattr(resp, "usage", None)
+            if u is not None:
+                details = getattr(u, "input_tokens_details", None)
+                cached = getattr(details, "cached_tokens", 0) or 0
+                self.usage.add(stage, self.model, u.input_tokens, u.output_tokens, cached)
+        finally:
+            self.usage.release(estimate)
         return resp
 
     @staticmethod

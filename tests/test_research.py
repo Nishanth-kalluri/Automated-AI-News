@@ -282,6 +282,19 @@ def test_an_already_aired_source_is_refused():
     assert f.url == "" and f.status == "wrong_story"
 
 
+def test_nothing_from_a_link_about_another_story_counts():
+    wrong = Doc(url=URL, title="Nvidia Rubin", text=_article(Q1, Q2), published="2026-09-25", via="tavily")
+    src = Doc(url=HIT, title="Nvidia unveils Rubin at GTC Paris", text=_article(Q3), via="search")
+    data = {"matches_pick": "no", "first_reported": "2026-09-25", "source_url": "",
+            "evidence": [{"quote": Q1, "url": URL}, {"quote": Q2, "url": URL}]}
+    f = _researcher().verify(_pick(body=wrong.text), data, _pool(wrong))
+    assert (f.status, f.evidence, f.first_reported) == ("wrong_story", [], "")
+    f = _researcher().verify(_pick(body=wrong.text), {**data, "source_url": HIT,
+                                                      "evidence": data["evidence"] + [{"quote": Q3, "url": HIT}]},
+                             _pool(wrong, src))
+    assert f.url == HIT and [e.quote for e in f.evidence] == [Q3] and f.first_reported == "" and f.dropped == 2
+
+
 # --- one researcher's tool loop ---------------------------------------------------------------
 
 def test_researcher_searches_reads_a_hit_from_the_pool_and_verifies(http):
@@ -552,6 +565,32 @@ def test_a_bench_story_fills_one_slot_at_most():
     researcher = FakeResearcher()
     out = swap_failing(researcher, stories, [_checked("X", ""), _checked("Y", "")], lambda picks: picks)
     assert researcher.batches == [["X", "Y"]] and sorted(s.title for s in out) == ["A", "X", "Y"]
+
+
+def test_a_replacement_that_repeats_any_pick_is_skipped():
+    stories = [_checked("A"), _checked("B", "stale"), _checked("C", "thin")]
+    again = _checked("B", "")  # the feed article behind pick B: same link, a different object
+    researcher = FakeResearcher()
+    out = swap_failing(researcher, stories, [again, _checked("X", "")], lambda picks: picks)
+    assert researcher.batches == [["X"]]  # B can't replace itself, and C can't take B either
+    assert [s.title for s in out] == ["A", "C", "X"]
+
+
+def test_a_thin_pick_is_kept_unless_the_replacement_is_verified():
+    stories = [_checked("A"), _checked("T", "thin"), _checked("S", "stale")]
+    out = swap_failing(FakeResearcher({"X": "failed", "Y": "failed"}), stories,
+                       [_checked("X", ""), _checked("Y", "")], _distinct)
+    assert [s.title for s in out] == ["A", "T", "X"]  # the stale pick goes; the thin one keeps its article
+    wrong = [_checked("A"), _checked("W", "wrong_story")]
+    out = swap_failing(FakeResearcher({"X": "stale"}), wrong, [_checked("X", "")], _distinct)
+    assert [s.title for s in out] == ["A", "W"]  # old news is no better than a bad link
+
+
+def test_a_kept_wrong_story_loses_its_quotes_and_date_too():
+    w = _checked("W", "wrong_story")
+    w.evidence, w.first_reported = [research.Evidence(Q1, URL)], "2026-09-20"
+    out = swap_failing(FakeResearcher(), [_checked("A"), w], [], _distinct)
+    assert (out[1].url, out[1].body, out[1].evidence, out[1].first_reported) == ("", "", [], "")
 
 
 def test_a_wrong_story_with_no_replacement_loses_its_link():

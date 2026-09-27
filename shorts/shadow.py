@@ -106,8 +106,9 @@ def _segment_for(rec: RunRecord, story: Story) -> Segment | None:
 
 def cross_check(live: RunRecord, shadow: RunRecord, pairs: list[tuple[Story, Story]], critic: LLM | None,
                 show: str, host: str) -> dict | None:
-    """Both scripts judged by one critic call on the same material: the shadow's checked quotes plus
-    the article text either side had. None when no shared story has quotes or there is no critic."""
+    """Both scripts judged by one critic call on the same material: everything either writer was
+    given (both summaries and key facts, the shadow's checked quotes, both articles). None when no
+    shared story has quotes or there is no critic."""
     from .writer import CriticWriter
 
     items = []
@@ -115,8 +116,13 @@ def cross_check(live: RunRecord, shadow: RunRecord, pairs: list[tuple[Story, Sto
         seg_a, seg_b = _segment_for(live, a), _segment_for(shadow, b)
         if b.evidence and seg_a and seg_b:
             quotes = "\n".join(f'- "{e.quote}"' for e in b.evidence)
-            body = f"Verified quotes:\n{quotes}\n\n{(a.body or b.body)[:6000]}"
-            items.append((replace(b, evidence=[], body=body, first_reported=""), seg_a, seg_b))
+            articles = "\n\n".join(dict.fromkeys(x.body[:6000] for x in (a, b) if x.body))
+            body = f"Also headlined: {_name(a)}\nVerified quotes:\n{quotes}\n\n{articles}"
+            material = replace(b, evidence=[], body=body, first_reported="",
+                               summary=" ".join(dict.fromkeys(x.summary for x in (a, b) if x.summary)),
+                               key_fact="; ".join(dict.fromkeys(x.key_fact for x in (a, b) if x.key_fact)),
+                               outlets=list(dict.fromkeys([*a.outlets, *b.outlets])))
+            items.append((material, seg_a, seg_b))
     if not items or critic is None:
         return None
     stories, segments = [], [Segment(kind="intro", text="")]

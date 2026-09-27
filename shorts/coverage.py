@@ -120,8 +120,8 @@ class Coverage:
         wait(list(futures.values()), timeout=timeout)
         pool.shutdown(wait=False, cancel_futures=True)
         unknown = {"hn_points": None, "hn_threads": None, "news_outlets": None, "outlets": []}
-        return {h: f.result() if f.done() and not f.exception() else {"headline": h, **unknown}
-                for h, f in futures.items()}
+        return {h: f.result() if f.done() and not f.cancelled() and f.exception() is None
+                else {"headline": h, **unknown} for h, f in futures.items()}
 
     def rows(self) -> list[dict]:
         with self._lock:

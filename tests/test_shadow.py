@@ -166,6 +166,19 @@ def test_cross_check_is_one_critic_call_split_into_live_and_shadow():
     assert "900 percent better" in check["claims"][0]["detail"]
 
 
+def test_cross_check_material_holds_what_both_writers_were_given():
+    live, shadow_rec = _day()
+    a = live.stories[0]
+    a.summary, a.key_fact, a.body = "Sol has a 2 million token context.", "2 million tokens", "LIVEBODY"
+    live.episode.segments[1].text = "Sol reads 2 million tokens at once."
+    critic = ScriptedLLM({"intro": [], "outro": [], "segments": []})
+    check = compare(live, shadow_rec, None, critic, "Duck Desk", "Quackers")["cross_check"]
+    prompt = critic.calls[0][1]
+    assert "Sol has a 2 million token context." in prompt and "LIVEBODY" in prompt and "BODYMARKER" in prompt
+    assert "Also headlined: OpenAI launches GPT-6 Sol" in prompt
+    assert check["live_numbers"] == 0  # its own summary backs the number
+
+
 def test_no_shared_evidence_means_no_cross_check_call():
     live, shadow_rec = _day()
     for s in shadow_rec.stories:

@@ -271,6 +271,24 @@ def test_lookup_many_returns_unknown_rows_for_lookups_that_time_out(http):
     assert rows[HEADLINE]["news_outlets"] == 0
 
 
+def test_lookup_many_keeps_finished_rows_when_queued_lookups_are_cancelled(http):
+    gate = threading.Event()
+    stalled = [f"Stalled Mistral model number {k} leak" for k in range(6)]
+
+    def hn(params):
+        if params["query"].startswith("Stalled"):
+            gate.wait(5)
+        return _Reply(data={"hits": [_hit(HEADLINE, 120)]})
+
+    http.hn = hn
+    try:
+        rows = Coverage(now=NOW).lookup_many([HEADLINE, *stalled], timeout=0.3)  # 4 workers: 3 still queued
+    finally:
+        gate.set()
+    assert rows[HEADLINE]["hn_points"] == 120
+    assert all(rows[h] == {"headline": h, **UNKNOWN} for h in stalled)
+
+
 def test_coverage_line_formats_known_and_unknown_values():
     assert Coverage.line({"hn_points": 120, "news_outlets": 4}) == "HN 120 pts, 4 outlets on Google News"
     assert Coverage.line({"hn_points": 0, "news_outlets": 0}) == "HN 0 pts, 0 outlets on Google News"
