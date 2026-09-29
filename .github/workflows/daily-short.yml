@@ -9,6 +9,10 @@ on:
         description: "Upload to YouTube (needs SHORTS_UPLOADER=youtube and the YouTube secrets)"
         type: boolean
         default: true
+      voices:
+        description: 'Also read the script with other voices to compare them: "all", "edge", "openai", or a list like edge:en-GB-MaisieNeural,openai:coral (empty: no comparison)'
+        type: string
+        default: ""
 
 permissions:
   contents: write  # to save state (already-aired stories, LLM spend, Tavily credits) on the `state` branch
@@ -30,7 +34,8 @@ jobs:
       - run: pip install ".[all]"
 
       # The `state` branch holds the stories that already aired (seen_urls.json), the month's LLM
-      # spend (spend.json), Tavily credits (tavily.json) and the shadow week's rows (shadow.jsonl).
+      # spend (spend.json), Tavily credits (tavily.json), the shadow week's rows (shadow.jsonl), the
+      # last intros (intros.json, so hooks don't repeat) and the last script (last_episode.json).
       - name: Load state
         id: load
         run: |
@@ -67,6 +72,15 @@ jobs:
           SHORTS_TAVILY_MONTHLY_CREDITS: ${{ vars.SHORTS_TAVILY_MONTHLY_CREDITS }}
           SHORTS_TAVILY_RUN_CREDITS: ${{ vars.SHORTS_TAVILY_RUN_CREDITS }}
           SHORTS_NOTIFY_EMAIL: ${{ vars.SHORTS_NOTIFY_EMAIL }}
+          SHORTS_SOURCES: ${{ vars.SHORTS_SOURCES }}
+          SHORTS_STORIES_PER_VIDEO: ${{ vars.SHORTS_STORIES_PER_VIDEO }}
+          SHORTS_MIN_STORIES: ${{ vars.SHORTS_MIN_STORIES }}
+          SHORTS_VOICE: ${{ vars.SHORTS_VOICE }}
+          SHORTS_EDGE_VOICE: ${{ vars.SHORTS_EDGE_VOICE }}
+          SHORTS_EDGE_RATE: ${{ vars.SHORTS_EDGE_RATE }}
+          SHORTS_OPENAI_VOICE: ${{ vars.SHORTS_OPENAI_VOICE }}
+          SHORTS_OPENAI_TTS_MODEL: ${{ vars.SHORTS_OPENAI_TTS_MODEL }}
+          SHORTS_VOICE_LINEUP: ${{ inputs.voices }}
           SHORTS_UPLOADER: ${{ vars.SHORTS_UPLOADER || 'local' }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
@@ -98,4 +112,6 @@ jobs:
             output/*/shadow/short.mp4
             output/*/shadow/*.json
             output/*/shadow/captions.ass
+            output/*/voices/*.mp3
+            output/*/voices/voices.txt
           if-no-files-found: ignore

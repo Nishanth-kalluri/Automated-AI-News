@@ -12,6 +12,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .content import is_banned_name
 from .models import Episode, Segment
 
 W, H = 1080, 1920
@@ -142,7 +143,7 @@ class StoryCards:
             width = chip_font.getlength(fact)
             d.rounded_rectangle([l + 50, y, l + 90 + width, y + 70], radius=35, fill=ORANGE)
             d.text((l + 70, y + 35), fact, font=chip_font, fill=(255, 255, 255), anchor="lm")
-        if seg.source:
+        if seg.source and not is_banned_name(seg.source):  # credit publishers, never a newsletter or forum
             via_font = font(32, bold=False)
             d.text((l + 50, b - 56), fit_line(f"via {seg.source}", via_font, r - l - 100), font=via_font, fill=MUTED)
         return img
@@ -168,7 +169,7 @@ class StoryCards:
         l, t, r, b = CARD
         d.rounded_rectangle(CARD, radius=36, fill=PAPER)
         cx = (l + r) // 2
-        d.text((cx, t + 200), "Follow for tomorrow's", font=font(64), fill=INK, anchor="mm")
+        d.text((cx, t + 200), "Subscribe for tomorrow's", font=font(64), fill=INK, anchor="mm")
         d.text((cx, t + 290), "AI news", font=font(64), fill=ORANGE, anchor="mm")
         d.text((cx, t + 430), "Sources in the description", font=font(40, bold=False), fill=MUTED, anchor="mm")
         return img

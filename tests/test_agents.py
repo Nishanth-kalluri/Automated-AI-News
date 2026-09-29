@@ -26,6 +26,43 @@ def _story(title, url=None, hours_ago=1, kind="article", summary="An AI model fr
                  source=source, published=NOW - timedelta(hours=hours_ago), summary=summary, kind=kind, body=body)
 
 
+# Feed text with enough substance to air (description_problem needs 12+ words, 10+ beyond the headline).
+SUMMARIES = {
+    "OpenAI model launch": "OpenAI released a new reasoning model to ChatGPT users and developers. It scores higher on "
+                           "coding and math tests and costs less to run than the model it replaces.",
+    "OpenAI model": "OpenAI made its newest model the default in ChatGPT for free and paid users alike. The company "
+                    "says it answers faster and makes fewer factual mistakes in long conversations.",
+    "Nvidia AI chip": "Nvidia showed a data center chip built for serving AI models. The company says it cuts the "
+                      "cost of each chatbot answer, and cloud providers get the first units this year.",
+    "Nvidia unveils AI chip": "Nvidia unveiled a data center chip designed for running trained AI models. Cloud "
+                              "providers say it will make chatbot answers cheaper to serve later this year.",
+    "Google Gemini update": "Google rolled out an update to its Gemini assistant on Android phones. It can now read "
+                            "what is on screen and take actions inside apps like Gmail and Maps when asked.",
+    "OpenAI ships GPT agent": "OpenAI launched an agent inside ChatGPT that browses websites and fills in forms. "
+                              "Paying users can ask it to book a table or order groceries, and it checks before buying.",
+    "EU passes AI rules": "European lawmakers approved new rules for general purpose AI models. Developers of the "
+                          "largest models must publish training data summaries and report serious incidents.",
+    "Nvidia unveils inference chip": "Nvidia unveiled a chip made for running AI models rather than training them. "
+                                     "Cloud companies expect it to lower what each chatbot answer costs them.",
+    "EU passes AI audit rules": "The European Parliament voted for independent audits of high risk AI systems. "
+                                "Companies selling hiring or credit scoring tools must prove they are tested for bias.",
+    "Anthropic raises funding for Claude": "Anthropic raised new funding from investors led by a large tech fund. "
+                                           "The money pays for computing power to train and serve future Claude models.",
+    "Google Gemini tops math olympiad": "A Gemini model from Google solved most problems from this year's "
+                                        "International Mathematical Olympiad, scoring at the level of top human students.",
+    "Meta open sources Llama": "Meta released its latest Llama model with open weights for researchers and companies. "
+                               "Developers can download it and run it on their own servers without paying fees.",
+    "Mistral releases coding model": "French startup Mistral released a model that writes and fixes software code. "
+                                     "It runs on a single graphics card and plugs into popular code editors.",
+    "DeepMind robot learns to cook": "Google DeepMind trained a robot arm to prepare simple meals by watching videos "
+                                     "of people cooking, then practicing each step in a simulated kitchen.",
+}
+
+
+def _news(title, **kw):
+    return _story(title, summary=SUMMARIES[title], **kw)
+
+
 def _pick(headline, url, summary="It happened today."):
     return {"headline": headline, "summary": summary, "key_fact": "", "url": url, "outlets": ["TLDR AI"], "why": ""}
 
@@ -147,7 +184,7 @@ def test_bad_editor_picks_are_dropped_or_fixed_and_topped_up(tmp_path):
     aired = _story("Anthropic ships Claude agent")
     aired.headline = aired.title
     seen.add([aired])
-    candidates = [_story("OpenAI model launch"), _story("Nvidia AI chip"), _story("Google Gemini update")]
+    candidates = [_news("OpenAI model launch"), _news("Nvidia AI chip"), _news("Google Gemini update")]
     reply = {"stories": [_pick("OpenAI model launch", "https://invented.link/x"),
                          _pick("Anthropic ships Claude agent", "https://news.example/other"),
                          _pick("OpenAI model launch again", candidates[0].url)]}
@@ -160,7 +197,7 @@ def test_bad_editor_picks_are_dropped_or_fixed_and_topped_up(tmp_path):
 
 
 def test_editor_keeps_its_draft_when_a_repair_call_fails(tmp_path):
-    candidates = [_story("OpenAI ships GPT agent"), _story("Nvidia unveils AI chip"), _story("EU passes AI rules")]
+    candidates = [_news("OpenAI ships GPT agent"), _news("Nvidia unveils AI chip"), _news("EU passes AI rules")]
     draft = {"stories": [_pick("OpenAI ships GPT agent", candidates[0].url, summary="Written by the editor."),
                          _pick("Nvidia unveils AI chip", candidates[1].url),
                          _pick("OpenAI ships a GPT agent", candidates[0].url)]}
@@ -228,7 +265,7 @@ def test_budget_cap_stops_calls_and_editor_falls_back(tmp_path):
     with pytest.raises(BudgetExceeded):
         llm.json("s", "u", stage="writer")
     assert fake.calls == []
-    picks = pick_with_fallback(AgentEditor(llm, 30), [_story("OpenAI model"), _story("Nvidia AI chip")], 2,
+    picks = pick_with_fallback(AgentEditor(llm, 30), [_news("OpenAI model"), _news("Nvidia AI chip")], 2,
                                SeenStore(tmp_path / "seen.json"), 30)
     assert len(picks) == 2
 
@@ -248,8 +285,12 @@ def test_spend_ledger_carries_the_month_across_runs(tmp_path):
 # --- writer agent ----------------------------------------------------------------------------
 
 def _stories():
-    a = _story("Lab ships agent", summary="The lab shipped an agent that books travel in 3 steps.")
-    b = _story("Chip is faster", summary="The new chip is 2 times faster at inference.")
+    a = _story("Lab ships agent", summary="The lab shipped an agent that books travel in 3 steps. Users say where "
+                                          "and when they want to go, the agent compares flights and hotels, and it "
+                                          "asks for approval before paying.")
+    b = _story("Chip is faster", summary="The new chip is 2 times faster at inference than the one it replaces. "
+                                         "Cloud providers say faster inference makes chatbots cheaper to serve, and "
+                                         "the first servers ship to customers this year.")
     for s in (a, b):
         s.headline = s.title
     return [a, b]
@@ -289,7 +330,8 @@ def test_critic_findings_that_survive_the_repairs_fall_back_per_segment():
     llm = ScriptedLLM(_script(GOOD_A, wrong_b), flagged, no_change, flagged, no_change, flagged)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=2).write(_stories())
     assert ep.story_segments[0].text == GOOD_A  # untouched
-    assert ep.story_segments[1].text.startswith("Chip is faster. The new chip is 2 times faster")  # from summary
+    # from the summary, which restates the headline, so the headline isn't read out as well
+    assert ep.story_segments[1].text.startswith("The new chip is 2 times faster")
 
 
 def test_a_claim_only_the_critic_catches_falls_back_after_the_repairs():
@@ -300,7 +342,7 @@ def test_a_claim_only_the_critic_catches_falls_back_after_the_repairs():
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=2).write(_stories())
     assert not lint_episode(replace(ep, segments=[ep.segments[0], Segment("story", claim_a, "Lab ships agent"),
                                                   *ep.segments[2:]]), _stories())  # invisible to the rules
-    assert ep.story_segments[0].text.startswith("Lab ships agent. The lab shipped")  # template line
+    assert ep.story_segments[0].text.startswith("The lab shipped")  # template line: the summary, headline once
     assert ep.story_segments[1].text == GOOD_B
     assert [c[0] for c in llm.calls].count("critic") == 3
 
@@ -314,7 +356,8 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     llm = ScriptedLLM(script, flagged, revision, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
     problems = llm.calls[2][1]
-    assert "the intro uses hype words" in problems and "400 billion" in problems and "the outro" in problems
+    assert "the intro uses hype words" in problems and "400 billion" in problems
+    assert "the outro" not in problems  # the outro is the show's own: not the critic's to fix
     assert ep.segments[0].text == "The lab's agent books travel now, plus 1 more AI story."
     assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]  # frame problems don't open the stories
     llm = ScriptedLLM(script, NO_ISSUES)
@@ -323,7 +366,8 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     no_change = {"intro": "", "outro": "", "segments": []}
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B), flagged, no_change, flagged)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
-    assert ep.segments[-1].text == TemplateWriter("Show", "Host").outro().text  # the critic's finding stuck
+    assert ep.segments[-1].text == TemplateWriter("Show", "Host").outro().text  # always the show's outro
+    assert [c[0] for c in llm.calls] == ["writer", "critic"]  # a finding on the fixed outro costs no rewrite
     assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]
 
 
@@ -379,7 +423,7 @@ def test_critic_writer_fills_a_missing_segment_instead_of_dropping_the_script():
     short["segments"] = short["segments"][:1]
     llm = ScriptedLLM(short, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=0).write(_stories())
-    assert ep.story_segments[0].text == GOOD_A and ep.story_segments[1].text.startswith("Chip is faster.")
+    assert ep.story_segments[0].text == GOOD_A and ep.story_segments[1].text.startswith("The new chip is 2 times")
     assert ep.title == "AI today"
 
 
@@ -475,15 +519,29 @@ def test_live_run_with_no_voice_fails_qa(monkeypatch, tmp_path):
     titles = ["OpenAI ships GPT agent", "Nvidia unveils inference chip", "EU passes AI audit rules",
               "Anthropic raises funding for Claude", "Google Gemini tops math olympiad", "Meta open sources Llama",
               "Mistral releases coding model", "DeepMind robot learns to cook"]
-    live = [_story(t, summary="An AI model from OpenAI shipped today.") for t in titles]
+    live = [_news(t) for t in titles]
     monkeypatch.setattr(pipeline, "fetch_all", lambda sources: live)
     monkeypatch.setattr(pipeline.composer, "render", lambda vo, cards, desk, host, out, preset: out)
     monkeypatch.setattr(qa, "media_duration", lambda p: 120.0)
     monkeypatch.setattr(qa, "has_audio", lambda p: True)
-    cfg = replace(Config.from_env().offline(), sources=["rss"])  # live news, but SHORTS_VOICE=silent
+    # live news and the template writer (SHORTS_ALLOW_NO_AI=on, or there is no episode without a model),
+    # but SHORTS_VOICE=silent
+    cfg = replace(Config.from_env().offline(), sources=["rss"], allow_no_ai=True)
     with pytest.raises(RuntimeError, match="no voice at all"):
         pipeline.run(cfg)
     assert not (tmp_path / "state" / "seen_urls.json").exists()
+    assert not (tmp_path / "state" / "intros.json").exists()
+
+
+def test_live_run_without_a_model_stops_before_fetching(monkeypatch, tmp_path):
+    monkeypatch.setenv("SHORTS_OUTPUT_DIR", str(tmp_path / "out"))
+    monkeypatch.setenv("SHORTS_STATE_DIR", str(tmp_path / "state"))
+    fetched = []
+    monkeypatch.setattr(pipeline, "fetch_all", lambda sources: fetched.append(sources) or [])
+    cfg = replace(Config.from_env().offline(), sources=["rss"], allow_no_ai=False)
+    with pytest.raises(RuntimeError, match="No AI model is set up"):
+        pipeline.run(cfg)
+    assert fetched == []
 
 
 def test_narrate_reuses_unchanged_clips(tmp_path):

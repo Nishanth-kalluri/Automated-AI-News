@@ -1,29 +1,56 @@
 # Duck Desk: automated AI news Shorts
 
 Every day this pipeline reads the AI newsletters that arrived in its inbox plus AI news
-feeds, picks the 8 biggest stories, writes a ~2 minute script, has a cartoon duck anchor
-read it, and uploads the vertical video to YouTube.
+feeds, picks up to 8 of the biggest stories, writes a ~2 minute script, has a cartoon duck
+anchor read it, and uploads the vertical video to YouTube.
 
 ```
-gather news -> pick 8 -> read articles -> write episode -> voice -> animate duck -> cards -> render -> QA -> upload -> email
+gather news -> pick up to 8 -> read articles -> write episode -> voice -> animate duck -> cards -> render -> QA -> upload -> email
 sources.py    selection   research.py     writer.py        voice.py  character.py    visuals   composer   qa.py  upload.py  notify.py
 ```
 
 Every stage is a small interface with a factory that picks the implementation from
-config, and every stage that needs a key or the network falls back to a free or offline
-default, so a run always finishes when there is real news to report.
+config, and most stages that need a key or the network fall back to a free or offline
+default. The exception is the LLM: without it a live run stops and emails why, because a
+script read out by a template from feed snippets isn't good enough to publish
+(`SHORTS_ALLOW_NO_AI=on` overrides this; `run --offline` is unaffected).
+
+## What never goes on air
+
+The show is its own show, not somebody's newsletter. `content.py` holds the rules, and they
+are checked in code, not just asked of the models:
+
+- Source text is cleaned before any stage sees it: "This story originally appeared in our
+  newsletter", "The post ... appeared first on ...", sign-up asks and forum points and
+  comments are dropped.
+- The script, headlines, key facts, title and description may not mention newsletters,
+  Hacker News, Reddit, points, upvotes or comments, or talk like a publication ("our
+  newsletter", "we reported"). The on-screen "via" line and "Covered by" credit only real
+  publishers. The writer and critic are told the same, and a code check sends any slip back.
+- Every story needs a real description: a story that is only a headline, or a link to a forum
+  thread, is left out. A segment that repeats itself, barely goes beyond its headline, or
+  copies 15+ words in a row from an article goes back for a rewrite.
+- Duplicates are caught by headline comparison and then by a second model look.
+- Fewer stories beats weak ones: up to `SHORTS_STORIES_PER_VIDEO` (8), at least
+  `SHORTS_MIN_STORIES` (4), else no episode that day.
+- The intro opens with a fresh hook each day (the last 7 intros are kept in
+  `state/intros.json` and the writer must open differently). The outro is fixed:
+  "Subscribe so you don't get lost in the storm of AI news. That's the news from the pond.
+  See you tomorrow!" (`SHORTS_OUTRO`).
 
 With an LLM key, the two judgement stages run as agents (`SHORTS_AGENTS=on`, the default):
 
 - **Editor agent** (`selection.py`) can search the day's candidates and the list of stories
   that already aired while it picks. Its picks are then checked in code (`checks.py`): no
   duplicates, no repeats, only links that appear in the sources, nothing too old. Problems go
-  back to it for up to `SHORTS_MAX_REPAIRS` rounds; picks that still fail are dropped and
-  replaced from the keyword-scored pool.
+  back to it for up to `SHORTS_MAX_REPAIRS` rounds; picks that still fail are dropped, and
+  only if fewer than `SHORTS_MIN_STORIES` remain is the list topped up from the keyword-scored
+  pool, with stories whose feed text really describes them.
 - **Writer agent** (`writer.py`) drafts the script, then a critic model checks every claim
-  against the story material while code checks length, hype words, links in the narration
-  and numbers that aren't in the sources. Only the failing segments are rewritten; any that
-  still fail get the template line for that story, not a whole-script fallback.
+  against the story material, and each segment's quality as TV news, while code checks length,
+  hype words, links in the narration, numbers that aren't in the sources and the rules above.
+  Only the failing segments are rewritten; any that still fail get the template line for that
+  story, and a story whose template line would break the rules too is left out.
 
 With `SHORTS_WEB=on` (web research, off by default until the shadow week below says it helps):
 
@@ -44,8 +71,9 @@ Every LLM call is priced and logged in `cost.json`. A run stops calling the LLM 
 `SHORTS_BUDGET_USD` (default $0.60) and the month at `SHORTS_MONTHLY_BUDGET_USD` (default $18,
 kept in `state/spend.json`); stages then use their no-key fallbacks.
 
-A run fails instead of uploading when every news source is down, when there aren't enough
-fresh stories, when the voice left a segment silent, or when a sample story slipped in.
+A run fails instead of uploading when every news source is down, when there's no LLM, when
+there aren't enough solid stories, when the voice left a segment silent, or when a sample story
+slipped in. The failure email says which.
 
 ## Quick start
 
@@ -81,7 +109,7 @@ Each run writes `output/<timestamp>/`:
 | Pick | editor agent with search tools and checked picks (`SHORTS_EDITOR_MODEL`) | `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) | keyword + freshness scoring | web search, analytics feedback |
 | Read | Tavily extracts the full article for each pick; with `SHORTS_WEB=on`, a research agent per story checks it and quotes it | `TAVILY_API_KEY` (optional with `SHORTS_WEB=on`) | newsletter summary only | |
 | Script | writer agent + critic (`SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL`), persona in `shorts/persona.md` | LLM key | template line per failing segment | LangGraph newsroom with approval |
-| Voice | edge-tts `en-US-AnaNeural` (free); script trimmed if the audio runs past 170 s | internet | silence, which fails QA | ElevenLabs designed voice |
+| Voice | edge-tts `en-US-AnaNeural` at +18% (free), or OpenAI voices (`SHORTS_VOICE=openai`); script trimmed if the audio runs past 170 s | internet (OpenAI: `OPENAI_API_KEY`) | silence, which fails QA | ElevenLabs designed voice |
 | Host | puppet duck, bill moves with the voice loudness | – | – | Kling AI Avatar (`SHORTS_ANIMATOR`) |
 | Render | cards + duck + desk + karaoke captions, one ffmpeg call | – | – | Remotion |
 | Upload | `local` (metadata only) or `youtube` (private, marked synthetic) | YouTube OAuth secrets | – | public after API audit |
@@ -113,7 +141,20 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_SHADOW` | variable | optional, `on` for the shadow week (see below) |
 | `SHORTS_TAVILY_MONTHLY_CREDITS`, `SHORTS_TAVILY_RUN_CREDITS` | variables | optional, default `700` and `25` |
 | `SHORTS_UPLOADER` | variable | `youtube` once the YouTube secrets are in |
+| `SHORTS_STORIES_PER_VIDEO`, `SHORTS_MIN_STORIES` | variables | optional, default `8` and `4` |
+| `SHORTS_SOURCES` | variable | optional, default `newsletter,rss` |
+| `SHORTS_VOICE`, `SHORTS_EDGE_VOICE`, `SHORTS_EDGE_RATE`, `SHORTS_OPENAI_VOICE`, `SHORTS_OPENAI_TTS_MODEL` | variables | optional; see "Choosing a voice" |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |
+
+## Choosing a voice
+
+Run the workflow by hand (Actions, Daily AI Short, Run workflow) and fill in **voices** with
+`all` (10 free Microsoft voices and 4 OpenAI voices), `edge`, `openai`, or a list like
+`edge:en-GB-MaisieNeural,openai:coral`. After the episode is made, the same script is read by
+each voice, and the run's download (`episode.zip`) has one MP3 per voice in `voices/` plus
+`voices.txt` with the variables to set for each. The OpenAI voices cost a few cents per
+comparison run. Locally: `python -m shorts voices --voices all` reads the last episode's script
+(`state/last_episode.json`) or `--script output/<run>/03-episode.json`.
 
 ## Trying web research: the shadow week
 

@@ -21,21 +21,22 @@ from pathlib import Path
 
 from . import composer
 from .character import build_animator
-from .checks import TARGET_MAX_SECONDS
+from .checks import TARGET_MAX_SECONDS, _event_words, norm_url, same_event
 from .config import Config
+from .content import banned_names, description_problem
 from .coverage import Coverage
 from .llm import SpendLedger, Usage, build_llm, with_model
 from .models import Episode, Story
 from .notify import build_notifier, notify
 from .qa import QAReport, check
 from .research import AgentResearcher, build_researcher, research, swap_failing
-from .selection import HeuristicEditor, SeenStore, build_editor, pick_with_fallback, settle
+from .selection import HeuristicEditor, SeenStore, build_editor, drop_duplicates, pick_with_fallback, settle
 from .sources import build_sources, fetch_all
 from .upload import build_uploader
 from .visuals import StoryCards
-from .voice import build_voice, narrate
+from .voice import build_voice, lineup, narrate, parse_lineup
 from .web import TavilyCredits, build_web
-from .writer import build_writer, episode_json, shorten, write_episode
+from .writer import IntroLog, build_writer, episode_json, shorten, write_episode
 
 log = logging.getLogger(__name__)
 VOICE_PASSES = 3  # voice, and up to two trims if it runs long
@@ -166,7 +167,14 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     llm = build_llm(cfg, usage)
     agents = cfg.agents and llm is not None
     offline = cfg.sources == ["sample"]
+    if llm is None and not offline and not cfg.allow_no_ai:
+        # Without a model the script is feed text read out by a template: forum points, newsletter
+        # boilerplate, repeated headlines. Better no episode than that one.
+        raise RuntimeError("No AI model is set up (OPENAI_API_KEY is missing), so there's no episode today: "
+                           "a template-read script isn't good enough to publish. Set SHORTS_ALLOW_NO_AI=on "
+                           "to publish one anyway.")
     n = cfg.stories_per_video
+    min_n = max(min(cfg.min_stories, n), 1)
     web = build_web(cfg, credits)
     rec.coverage = web.coverage if web else None
 
@@ -182,13 +190,14 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
         _dump(run_dir / "01-candidates.json", _story_rows(candidates))
         _dump(run_dir / "01-candidates.full.json", _story_rows(candidates, with_body=True))  # to replay the editor
 
+    banned = banned_names(candidates)  # today's newsletter senders: never named on the show
     editor = build_editor(with_model(llm, cfg.editor_model), cfg.max_age_hours, agents, cfg.max_repairs,
-                          coverage=web.coverage if web else None, tavily=web.tavily if web else None)
-    log.info("[2/9] %s editor picking %d of %d candidates", editor.name, n, len(candidates))
-    stories = pick_with_fallback(editor, candidates, n, seen, cfg.max_age_hours)
-    if len(stories) < n:
-        raise RuntimeError(f"Only {len(stories)} fresh, unused AI stories today (need {n}). "
-                           "Try raising SHORTS_MAX_AGE_HOURS or lowering SHORTS_STORIES_PER_VIDEO.")
+                          coverage=web.coverage if web else None, tavily=web.tavily if web else None,
+                          min_stories=min_n)
+    log.info("[2/9] %s editor picking up to %d of %d candidates", editor.name, n, len(candidates))
+    stories = pick_with_fallback(editor, candidates, n, seen, cfg.max_age_hours, min_n)
+    _enough(stories, min_n, "fresh, unused AI stories")
+    tried = [(norm_url(s.url), s.headline or s.title) for s in stories]  # before research changes any link
     for s in stories:
         log.info("      %s  (%s)", s.headline or s.title, ", ".join(s.outlets or [s.source]))
 
@@ -204,18 +213,28 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
         rec.swaps = sum(1 for s in stories if not any(s is p for p in picked))
         rec.research = researcher.rows
         _dump(run_dir / "02-research.json", researcher.rows)
+    checker = with_model(llm, cfg.checker_model)
+    stories = _described(drop_duplicates(checker, stories))
+    if len(stories) <= min_n:  # short, or no spare if the writer has to leave one out
+        stories = _refill(stories, min_n, n, candidates, seen, cfg.max_age_hours, researcher, checker, tried)
+    _enough(stories, min_n, "different stories with a solid description")
     rec.stories = stories
     _dump(run_dir / "02-picks.json", _story_rows(stories, with_body=True))
     if web:
         _dump(run_dir / "02-coverage.json", web.coverage.rows())
 
+    intros = IntroLog(cfg.state_dir / "intros.json")
     writer = build_writer(with_model(llm, cfg.writer_model), cfg.show_name, cfg.host_name, agents=agents,
-                          critic=with_model(llm, cfg.checker_model), max_repairs=cfg.max_repairs)
+                          critic=with_model(llm, cfg.checker_model), max_repairs=cfg.max_repairs, outro=cfg.outro,
+                          banned=banned, recent_intros=intros.recent)
     log.info("[4/9] writing the episode with %s writer", writer.name)
-    episode = rec.episode = write_episode(writer, stories, cfg.show_name, cfg.host_name)
+    episode = rec.episode = write_episode(writer, stories, cfg.show_name, cfg.host_name,
+                                          allow_template=offline or cfg.allow_no_ai, outro=cfg.outro)
     (run_dir / "03-episode.json").write_text(episode_json(episode))
     rec.review = getattr(writer, "report", {})
     _dump(run_dir / "03-review.json", rec.review)
+    stories = rec.stories = episode.stories or stories  # the writer leaves out a story it can't air
+    _enough(stories, min_n, "stories fit to air")
 
     voice = build_voice(cfg)
     log.info("[5/9] voicing %d segments with %s", len(episode.segments), voice.name)
@@ -241,7 +260,7 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
 
     log.info("[8/9] rendering the video")
     video = composer.render(vo, backgrounds, desk, host, run_dir / "short.mp4", cfg.x264_preset)
-    report = rec.qa = check(video, episode, n, vo, allow_sample=offline)
+    report = rec.qa = check(video, episode, min_n, vo, allow_sample=offline)
     _dump(run_dir / "qa.json", asdict(report))
     for w in report.warnings:
         log.warning("qa: %s", w)
@@ -258,6 +277,15 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
 
     if not offline:
         seen.add(stories)
+        intros.add(episode.segments[0].text)
+        # For `shorts voices`: the script only. The state branch is public, so no article text.
+        (cfg.state_dir / "last_episode.json").write_text(episode_json(replace(episode, stories=[])))
+    voices = ""
+    if parse_lineup(cfg.voice_lineup):
+        log.info("      reading the script with the voice lineup")
+        rows = lineup(cfg, episode, run_dir / "voices")
+        voices = (f"\n\nVoice lineup: {sum('file' in r for r in rows)} of {len(rows)} voices read this script. "
+                  "They're in the run's download (episode.zip, voices folder), with voices.txt saying how to pick one.")
     headlines = "\n".join(f"{i}. {s.headline}  {s.url}" for i, s in enumerate(episode.story_segments, 1))
     notify(build_notifier(cfg),
            f"New episode ready: {episode.title}",
@@ -265,6 +293,61 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
            f"Review it and make it public in YouTube Studio.\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
            f"Cost: ${usage.total_usd:.2f} (${usage.month_spent_usd + usage.total_usd:.2f} this month); "
            f"Tavily {credits.run_used} credits ({credits.this_month()}/{cfg.tavily_monthly_credits} this month)\n"
-           f"Warnings: {'; '.join(report.warnings) or 'none'}")
+           f"Warnings: {'; '.join(report.warnings) or 'none'}{voices}")
     log.info("done: %s", video)
     return video
+
+
+def _refill(stories: list[Story], min_n: int, n: int, candidates: list[Story], seen: SeenStore,
+            max_age_hours: float, researcher, checker, tried: list[tuple[str, str]] = ()) -> list[Story]:
+    """Top up a list that is at or under the minimum from the keyword ranking, one spare over it, so a
+    day is skipped only when there really aren't enough good stories.
+
+    The pool leaves out anything already tried: the same links (before research changed them), the
+    same events, and feed stories that the kept stories' own summaries already cover.
+    """
+    taken = ({u for u, _ in tried} | {norm_url(p.url) for p in stories}) - {""}
+    heads = [h for _, h in tried] + [p.headline or p.title for p in stories]
+    covered = [_event_words(f"{p.headline or p.title} {p.summary}") for p in stories]
+
+    def fresh(s: Story) -> bool:
+        head = s.headline or s.title
+        words = _event_words(head)
+        return (not description_problem(s) and norm_url(s.url) not in taken
+                and not any(s is p for p in stories) and not any(same_event(head, h) for h in heads)
+                and not (words and any(len(words & c) / len(words) >= 0.5 for c in covered)))
+
+    pool = [s for s in HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen) if fresh(s)]
+    for _ in range(3):  # small batches: the dedupe may still remove some
+        want = min(n, min_n + 1) - len(stories)
+        if want <= 0 or not pool:
+            break
+        batch = settle(pool, candidates, want, seen, max_age_hours)
+        pool = [s for s in pool if not any(s is b for b in batch)]
+        if not batch:
+            break
+        log.info("      %d stories; adding %s from the keyword ranking", len(stories),
+                 ", ".join(repr(s.headline or s.title) for s in batch))
+        research(researcher, batch)
+        batch = [s for s in batch if s.checked not in ("wrong_story", "stale")]
+        stories = _described(drop_duplicates(checker, stories + batch))
+    return stories
+
+
+def _described(stories: list[Story]) -> list[Story]:
+    """Only stories with a real description go on air: never a headline read out on its own, and
+    never a forum thread."""
+    kept = []
+    for s in stories:
+        why = description_problem(s)
+        if why:
+            log.warning("      leaving out %r: it %s", s.headline or s.title, why)
+        else:
+            kept.append(s)
+    return kept
+
+
+def _enough(stories: list[Story], min_n: int, what: str) -> None:
+    if len(stories) < min_n:
+        raise RuntimeError(f"Only {len(stories)} {what} today (at least {min_n} needed), so there's no episode "
+                           "today rather than a weak one. SHORTS_MIN_STORIES sets the minimum.")

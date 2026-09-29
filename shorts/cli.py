@@ -22,6 +22,12 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("youtube-auth", help="one-time OAuth login; prints YOUTUBE_REFRESH_TOKEN")
     a.add_argument("client_secret", help="path to the OAuth client JSON from Google Cloud Console")
 
+    v = sub.add_parser("voices", help="read a finished script with several voices, to compare them")
+    v.add_argument("--script", help="a run's 03-episode.json (default: the last episode, state/last_episode.json)")
+    v.add_argument("--voices", default="all",
+                   help='"all", "edge", "openai", or a comma list like edge:en-US-AnaNeural,openai:coral')
+    v.add_argument("--out", default="output/voices", help="where the MP3s go")
+
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -29,6 +35,22 @@ def main(argv: list[str] | None = None) -> int:
         from .upload import youtube_auth_flow
 
         print("YOUTUBE_REFRESH_TOKEN=" + youtube_auth_flow(args.client_secret))
+        return 0
+
+    if args.cmd == "voices":
+        from pathlib import Path
+
+        from .voice import lineup, parse_lineup
+        from .writer import episode_from_json
+
+        cfg = Config.from_env()
+        script = Path(args.script) if args.script else cfg.state_dir / "last_episode.json"
+        if not script.exists():
+            print(f"No script at {script}; make an episode first or pass --script output/<run>/03-episode.json")
+            return 1
+        rows = lineup(cfg, episode_from_json(script.read_text()), Path(args.out),
+                      parse_lineup(args.voices.split(",")))
+        print(f"{sum('file' in r for r in rows)} of {len(rows)} voices done; see {Path(args.out) / 'voices.txt'}")
         return 0
 
     cfg = Config.from_env()

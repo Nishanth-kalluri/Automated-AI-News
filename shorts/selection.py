@@ -16,9 +16,9 @@ from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
-from urllib.parse import urlsplit
 
 from .checks import check_picks, fatal, norm_url, same_event, similar
+from .content import description_problem, is_aggregator_url, is_newsletter_url, publisher_name
 from .llm import LLM, BudgetExceeded, Tool, capped, strict_object
 from .models import Story
 
@@ -98,11 +98,12 @@ def pick_stories(stories: list[Story], n: int, max_age_hours: float,
     for s in stories:
         s.score = score(s, now, max_age_hours)
     ranked = sorted((s for s in stories if s.score > 0 and s.url not in seen and s.title
-                     and s.kind == "article"),
+                     and s.kind == "article" and not is_aggregator_url(s.url) and not is_newsletter_url(s.url)),
                     key=lambda s: s.score, reverse=True)
     chosen: list[Story] = []
     for s in ranked:
-        if any(SequenceMatcher(None, _norm(s.title), _norm(c.title)).ratio() > 0.6 for c in chosen):
+        if any(SequenceMatcher(None, _norm(s.title), _norm(c.title)).ratio() > 0.6 or same_event(s.title, c.title)
+               for c in chosen):
             continue  # same story from another outlet
         chosen.append(s)
         if len(chosen) == n:
@@ -139,15 +140,22 @@ How to choose:
 - Rank by how much it matters to people who follow AI, and by how many independent sources covered it.
 - Skip sponsored sections, ads, job posts, tutorials, prompt tips, polls, memes and "tools of the day" lists.
 - Skip anything in the "already covered" list unless there is genuinely new information.
+- Skip Hacker News and Reddit threads, and anything whose only source is a forum discussion: those are
+  reactions to news, not news. Coverage numbers (points, comments, outlet counts) are only for ranking.
+- Every pick needs enough facts in the texts for a solid 15 second segment. Fewer, stronger stories beat
+  padding: return fewer than requested rather than a thin, vague or duplicate story.
 - Use only facts present in the texts. Never invent numbers, names or quotes.
+- Summaries describe the event itself. Never mention newsletters or Hacker News, never say what people on
+  Reddit or in comments said, never give points, upvotes or comment counts, and never copy a newsletter's or
+  site's lines about itself ("in our newsletter", "sign up"). News about Reddit the company is fine.
 
-Return JSON: {"stories": [ ... ]} with exactly the requested number of stories, most important first.
+Return JSON: {"stories": [ ... ]} with up to the requested number of stories, most important first.
 Every url must be copied exactly from the texts; never build or guess a link.
 Each story: {
   "headline": "on-screen headline, at most 8 words",
   "summary": "3 to 5 sentences with the concrete facts from the texts: who, what, numbers, why it matters",
   "key_fact": "the single most striking number or fact, at most 7 words, or empty string",
-  "url": "the best link for the story found in the texts, preferring the original announcement or article over newsletter links; empty string if none",
+  "url": "the best link for the story found in the texts, preferring the original announcement or article over newsletter links, never the newsletter's own web page; empty string if none",
   "outlets": ["names of every newsletter or site that covered it"],
   "why": "one line on why it made the cut"
 }"""
@@ -186,7 +194,8 @@ class LLMEditor:
         articles = sorted((s for s in candidates if s.kind == "article" and s.title),
                           key=lambda s: score(s, now, self.max_age_hours), reverse=True)
         articles = [s for s in articles if s.url not in seen.urls][:MAX_HEADLINES_FOR_LLM]
-        parts = [f"Today is {date.today().isoformat()}. Pick exactly {n} stories.\n"]
+        parts = [f"Today is {date.today().isoformat()}. Pick up to {n} stories: fewer if there aren't {n} solid, "
+                 "different news events.\n"]
         for i, s in enumerate(newsletters, 1):
             parts.append(f"=== NEWSLETTER {i}: {s.source} | {s.title} | {s.published:%Y-%m-%d %H:%M} UTC ===\n{s.body}\n")
         if articles:
@@ -233,13 +242,16 @@ class LLMEditor:
         for item in (data.get("stories") or [])[:n]:
             outlets = [o for o in item.get("outlets", []) if o] or ["AI newsletters"]
             url = (item.get("url") or "").strip()
+            if is_newsletter_url(url):
+                url = ""  # the newsletter's own web copy is never the source; research finds the original
             match = articles.get(norm_url(url))
-            if match and match.source not in outlets:
+            if match and match.source and match.source not in outlets:
                 outlets.append(match.source)
             picked.append(Story(
                 title=item.get("headline", "").strip(),
                 url=url,
-                source=match.source if match else outlets[0],
+                # the publisher to credit on screen: never a newsletter or a forum
+                source=(match.source if match else "") or publisher_name(url),
                 published=match.published if match else now,
                 summary=item.get("summary", "").strip(),
                 popularity=match.popularity if match else 0.0,
@@ -288,8 +300,9 @@ REPAIR_PROMPT = """
 === PROBLEMS TO FIX ===
 {problems}
 
-Return the full list of {n} stories again. Keep the good ones exactly as they are and replace or fix only the
-ones with problems. A replacement must be a different real event from the texts above."""
+Return the full list again, up to {n} stories. Keep the good ones exactly as they are and replace or fix only
+the ones with problems. A replacement must be a different real event from the texts above; if there is no good
+replacement, leave the story out."""
 
 
 def _snippet(text: str, terms: list[str], width: int = 320) -> str:
@@ -329,8 +342,9 @@ class AgentEditor:
     name = "agent"
 
     def __init__(self, llm: LLM, max_age_hours: float, max_repairs: int = 2, *,
-                 coverage: Coverage | None = None, tavily: Tavily | None = None):
+                 coverage: Coverage | None = None, tavily: Tavily | None = None, min_stories: int | None = None):
         self.llm, self.max_age_hours, self.max_repairs = llm, max_age_hours, max_repairs
+        self.min_stories = min_stories  # fewer picks than this goes back for repair; None means n
         self.coverage, self.tavily = coverage, tavily
         self.web = coverage is not None or tavily is not None
         self.base = LLMEditor(llm, max_age_hours, coverage)
@@ -368,7 +382,7 @@ class AgentEditor:
         for i, d in enumerate(docs, 1):
             if norm_url(d.url) not in known:
                 known.add(norm_url(d.url))
-                candidates.append(Story(title=d.title or d.url, url=d.url, source=_domain(d.url),
+                candidates.append(Story(title=d.title or d.url, url=d.url, source=publisher_name(d.url),
                                         published=_published(d.published, now), summary=d.snippet, kind="web"))
             rows.append(f"{i}. {d.title} | {d.url} | {d.published or 'date unknown'}\n   {d.snippet}")
         return "\n".join(rows) or "no results"
@@ -395,7 +409,7 @@ class AgentEditor:
                                                    MAX_ALTERNATES, quiet=True)
         for round_no in range(1, self.max_repairs + 1):
             issues = fatal(check_picks(picks, candidates, n, seen.urls, seen.recent_headlines(SeenStore.KEEP_DAYS),
-                                       self.max_age_hours))
+                                       self.max_age_hours, min_n=self.min_stories))
             if not issues:
                 break
             log.info("      editor repair round %d: %s", round_no, "; ".join(i.detail for i in issues))
@@ -416,11 +430,6 @@ class AgentEditor:
         return picks
 
 
-def _domain(url: str) -> str:
-    host = urlsplit(url).hostname or ""
-    return host.removeprefix("www.") or "web"
-
-
 def _published(day: str, now: datetime) -> datetime:
     """A search hit's date (YYYY-MM-DD) as the end of that day, capped at now; now if unknown."""
     try:
@@ -431,11 +440,13 @@ def _published(day: str, now: datetime) -> datetime:
 
 
 def build_editor(llm: LLM | None, max_age_hours: float, agents: bool = False, max_repairs: int = 2, *,
-                 coverage: Coverage | None = None, tavily: Tavily | None = None) -> Editor:
+                 coverage: Coverage | None = None, tavily: Tavily | None = None,
+                 min_stories: int | None = None) -> Editor:
     if not llm:
         return HeuristicEditor(max_age_hours)
     if agents:
-        return AgentEditor(llm, max_age_hours, max_repairs, coverage=coverage, tavily=tavily)
+        return AgentEditor(llm, max_age_hours, max_repairs, coverage=coverage, tavily=tavily,
+                           min_stories=min_stories)
     return LLMEditor(llm, max_age_hours, coverage)
 
 
@@ -455,6 +466,8 @@ def settle(picks: list[Story], candidates: list[Story], n: int, seen: SeenStore,
                   if i.index == len(kept) and i.fatal]
         if any(i.code == "url_not_in_sources" for i in issues):
             log.warning("      dropping made-up link %s for %r", s.url, s.headline or s.title)
+            if s.source == publisher_name(s.url):
+                s.source = ""  # the credit came from the made-up link
             s.url = ""
             issues = [i for i in issues if i.code != "url_not_in_sources"]
         if issues:
@@ -465,18 +478,55 @@ def settle(picks: list[Story], candidates: list[Story], n: int, seen: SeenStore,
 
 
 def pick_with_fallback(editor: Editor, candidates: list[Story], n: int, seen: SeenStore,
-                       max_age_hours: float) -> list[Story]:
-    """The editor's picks, checked, then topped up from the keyword ranking if any were dropped."""
+                       max_age_hours: float, min_n: int | None = None) -> list[Story]:
+    """The editor's picks, checked. Fewer than ``n`` is fine; below ``min_n`` (default ``n``) they are
+    topped up from the keyword ranking, but only with stories whose feed text really describes them."""
+    min_n = n if min_n is None else min(min_n, n)
     picked: list[Story] = []
     try:
         picked = editor.pick(candidates, n, seen)
     except Exception as exc:
         log.warning("%s editor failed (%s); falling back to heuristic", editor.name, exc)
-    pool = HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen)
+    pool = [s for s in HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen)
+            if not description_problem(s)]
     kept = settle(picked, candidates, n, seen, max_age_hours)
-    if len(kept) < n:
+    if len(kept) < min_n:
         if picked and not isinstance(editor, HeuristicEditor):
-            log.warning("%s editor gave %d usable stories of %d; topping up from the keyword ranking",
-                        editor.name, len(kept), n)
-        kept = settle(kept + [s for s in pool if s not in kept], candidates, n, seen, max_age_hours)
+            log.warning("%s editor gave %d usable stories (at least %d needed); topping up from the keyword "
+                        "ranking", editor.name, len(kept), min_n)
+        kept = settle(kept + [s for s in pool if s not in kept], candidates, n if not picked else min_n, seen,
+                      max_age_hours)
     return kept
+
+
+DEDUPE_SYSTEM = """You check the running order of a daily AI news show for duplicates: two stories about the
+same real-world event (the same launch, deal, paper, lawsuit, incident or announcement), even when the
+headlines are worded differently or come from different outlets. Related but separate events are not
+duplicates. Return JSON {"duplicates": [{"story": <the later story's number>, "same_as": <the earlier one's>}]},
+an empty list when every story is a different event."""
+DEDUPE_SCHEMA = strict_object({"duplicates": {"type": "array", "items": strict_object({
+    "story": {"type": "integer"}, "same_as": {"type": "integer"}})}})
+
+
+def drop_duplicates(llm: LLM | None, stories: list[Story]) -> list[Story]:
+    """A model's second look for picks that are the same event; the later one goes. Code checks
+    catch most duplicates first; this catches differently worded ones. Never fails the run."""
+    if llm is None or len(stories) < 2:
+        return stories
+    rows = "\n".join(f"{i}. {s.headline or s.title}: {s.summary[:300]}" for i, s in enumerate(stories, 1))
+    try:
+        data = llm.json(DEDUPE_SYSTEM, rows, stage="dedupe", schema=DEDUPE_SCHEMA)
+    except Exception as exc:
+        log.warning("      duplicate check failed (%s); keeping the picks", exc)
+        return stories
+    drop = set()
+    for d in data.get("duplicates") or []:
+        try:
+            later, earlier = int(d.get("story")), int(d.get("same_as"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if 0 < earlier < later <= len(stories):
+            drop.add(later - 1)
+    for i in sorted(drop):
+        log.warning("      dropping %r: same event as an earlier story", stories[i].headline or stories[i].title)
+    return [s for i, s in enumerate(stories) if i not in drop]

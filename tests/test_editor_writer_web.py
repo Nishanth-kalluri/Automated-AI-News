@@ -33,6 +33,8 @@ NAMES = ["Anthropic", "Nvidia", "Google", "Meta", "Mistral", "Apple", "Amazon", 
          "Intel", "Baidu"]
 PRODUCTS = ["Claude", "Blackwell", "Gemini", "Llama", "Codestral", "Siri", "Nova", "Copilot", "Command", "Gauss",
             "Gaudi", "Ernie"]
+SNIPPET = ("Lab launched a travel agent that plans trips and books flights and hotels. It compares prices across "
+           "sites and asks before paying for anything.")
 
 
 class RecordingLLM(ScriptedLLM):
@@ -78,7 +80,7 @@ def _tavily(monkeypatch, results_for, posts=None):
     return Tavily("tvly", TavilyCredits(None))
 
 
-def _hit(url, title, day="", content="A snippet about the launch."):
+def _hit(url, title, day="", content=SNIPPET):
     return {"url": url, "title": title, "content": content, "raw_content": content, "published_date": day}
 
 
@@ -98,7 +100,10 @@ def _outputs(call):
 
 
 def _feed(k):
-    return [_story(f"{n} ships {p} update", hours_ago=i + 1) for i, (n, p) in enumerate(zip(NAMES[:k], PRODUCTS[:k]))]
+    return [_story(f"{n} ships {p} update", hours_ago=i + 1,
+                   summary=f"{n} released a new version of its {p} AI model on Monday. The company says the update "
+                           "runs agents faster and costs less to serve than the model it replaces.")
+            for i, (n, p) in enumerate(zip(NAMES[:k], PRODUCTS[:k]))]
 
 
 # --- editor with web off: exactly phase 1 ----------------------------------------------------
@@ -113,7 +118,8 @@ def test_editor_without_web_sends_the_phase_1_prompt_tools_and_schema(tmp_path):
     assert not editor.web
     picks = editor.pick(candidates, 1, SeenStore(tmp_path / "seen.json"))
     expected = "\n".join([
-        f"Today is {date.today().isoformat()}. Pick exactly 1 stories.\n",
+        f"Today is {date.today().isoformat()}. Pick up to 1 stories: fewer if there aren't 1 solid, different news "
+        "events.\n",
         f"=== NEWSLETTER 1: TLDR AI | TLDR AI issue | {letter.published:%Y-%m-%d %H:%M} UTC ===\n{letter.body}\n",
         "=== FEED HEADLINES (source | published | title | url | snippet) ===",
         f"- Feed | {a.published:%m-%d %H:%M} | {a.title} | {a.url} | {a.summary}",
@@ -260,16 +266,16 @@ def test_a_link_from_web_search_passes_settle_and_takes_the_hit_date(tmp_path, m
     after = datetime.now(timezone.utc)
     rows = _outputs(fake.calls[1])["call0"]
     assert rows.startswith(f"1. Lab launches travel agent AI | {primary} | {yesterday}")
-    assert "date unknown" in rows and "A snippet about the launch." in rows
+    assert "date unknown" in rows and SNIPPET in rows
     webs = [c for c in candidates if c.kind == "web"]
     assert [c.url for c in webs] == [primary, fresh, "https://nodate.example/post"]
-    assert webs[0].source == "lab.ai" and webs[0].summary == "A snippet about the launch."
+    assert webs[0].source == "lab.ai" and webs[0].summary == SNIPPET
     assert webs[0].published == datetime(yesterday.year, yesterday.month, yesterday.day, 23, 59, tzinfo=timezone.utc)
     assert before <= webs[1].published <= after and before <= webs[2].published <= after  # capped at now
     assert picks[0].headline == "Lab launches travel agent" and picks[0].url.startswith(primary)
     assert picks[0].published == webs[0].published and picks[0].source == "lab.ai" and "lab.ai" in picks[0].outlets
     assert picks[1].headline == "Invented AI launch" and picks[1].url == ""  # made-up link still dropped
-    assert picks[2] in feed  # topped up from the feed, never from the web hits
+    assert len(picks) == 3 and picks[2] in feed  # topped up from the feed, never from the web hits
     assert not any(p in webs for p in picks)
     assert not [s for s in pick_stories(candidates, 10, 30) if s.kind == "web"]
     assert not [s for s in HeuristicEditor(30).pick(candidates, len(candidates), seen) if s.kind == "web"]
@@ -304,7 +310,8 @@ def test_to_stories_matches_web_hits_like_feed_articles():
     picks = LLMEditor.to_stories(data, [hit, letter], 2)
     assert picks[0].published == hit.published and picks[0].source == "lab.ai"
     assert picks[0].outlets == ["TLDR AI", "lab.ai"]
-    assert picks[1].source == "TLDR AI" and picks[1].published > hit.published  # a newsletter never matches
+    assert picks[1].published > hit.published  # a newsletter never matches
+    assert picks[1].source == "letter.example"  # credited to the link's publisher, never the newsletter (TLDR AI)
 
 
 def test_editor_tool_limits_are_10_coverage_and_3_web_search_calls(tmp_path, monkeypatch):
@@ -371,17 +378,6 @@ def _researched():
     return [a, b]
 
 
-def _phase1_block(stories):
-    out = []
-    for i, s in enumerate(stories, 1):
-        part = f"STORY {i}: {s.headline or s.title}\nCovered by: {', '.join(s.outlets or [s.source])}\n"
-        part += f"Key fact: {s.key_fact}\nSummary: {s.summary}\n"
-        if s.body:
-            part += f"Article text:\n{s.body}\n"
-        out.append(part)
-    return "\n".join(out)
-
-
 def test_story_block_with_evidence_shows_quotes_and_first_report_instead_of_the_article():
     block_a, block_b = _story_block(_researched()).split("\n\nSTORY 2: ")
     lines = block_a.splitlines()
@@ -402,12 +398,27 @@ def test_story_block_keeps_the_article_when_fewer_than_two_quotes_were_checked()
     assert block.endswith("Article text:\nARTICLE BODY that the writer must not see.")
 
 
-def test_story_block_without_evidence_is_byte_identical_to_phase_1():
+def test_story_block_without_evidence_has_the_pinned_format():
     stories = _stories()
+    summary_a, summary_b = stories[0].summary, stories[1].summary
     stories[0].body = "Full article text\nwith two lines."
     stories[1].outlets = ["TLDR AI", "The Verge"]
-    assert _story_block(stories) == _phase1_block(stories)
-    assert _story_block(_stories()) == _phase1_block(_stories())
+    stories[1].summary += " This story originally appeared in The Algorithm, our weekly newsletter."
+    assert _story_block(stories) == (
+        "STORY 1: Lab ships agent\n"
+        "Covered by: Feed\n"
+        "Key fact: \n"
+        f"Summary: {summary_a}\n"
+        "Article text:\n"
+        "Full article text with two lines.\n"  # cleaned like every source text
+        "\n"
+        "STORY 2: Chip is faster\n"
+        "Covered by: The Verge, Feed\n"  # the newsletter is never offered as a credit
+        "Key fact: \n"
+        f"Summary: {summary_b}\n")  # the newsletter's line about itself is gone
+    stories[1].outlets, stories[1].source = ["TLDR AI", "Daily Byte"], "Hacker News"
+    assert _story_block(stories[1:], {"Daily Byte"}) == (  # no creditable outlet: no "Covered by" line
+        f"STORY 1: Chip is faster\nKey fact: \nSummary: {summary_b}\n")
 
 
 def test_critic_gets_the_evidence_note_only_when_a_story_has_evidence():
@@ -455,10 +466,11 @@ def test_critic_writer_report_records_each_round():
     assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(0, 1), (0, 1)]  # a fresh report
     assert writer.report["fallbacks"] == [{"part": "story 1", "why": "not supported by the material: "
                                                                      "pays for everything itself"}]
+    assert writer.report["dropped"] == []  # the fallback text describes the story well enough to air
     llm.replies = [_script(GOOD_A, GOOD_B), RuntimeError("critic down")]
     writer.max_repairs = 0
     writer.write(_stories())
-    assert writer.report == {"rounds": [{"fatal": 0, "critic": 0, "problems": []}], "fallbacks": [],
+    assert writer.report == {"rounds": [{"fatal": 0, "critic": 0, "problems": []}], "fallbacks": [], "dropped": [],
                              "critic_errors": 1}
 
 
@@ -470,9 +482,11 @@ def test_critic_writer_report_lists_intro_outro_story_and_title_fallbacks():
     llm = ScriptedLLM(script, flagged)
     writer = CriticWriter(llm, llm, "Show", "Host", max_repairs=0)
     ep = writer.write(_stories())
-    assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(0, 3)]
-    assert len(writer.report["rounds"][0]["problems"]) == 3
-    assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "outro", "story 2", "title"]
+    # the critic's note on the outro is ignored: the outro is the show's own
+    assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(0, 2)]
+    assert len(writer.report["rounds"][0]["problems"]) == 2
+    assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "story 2", "title"]
+    assert writer.report["dropped"] == [] and len(ep.story_segments) == 2  # story 2 airs as its template text
     template = TemplateWriter("Show", "Host")
     assert ep.segments[0].text == template.intro(2).text and ep.segments[-1].text == template.outro().text
     assert ep.title == template.write(_stories()).title
@@ -486,7 +500,7 @@ def test_each_part_that_falls_back_is_recorded_once():
     writer = CriticWriter(llm, llm, "Show", "Host", max_repairs=0)
     ep = writer.write(_stories())
     assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(2, 1)]
-    assert ep.story_segments[1].text.startswith("Chip is faster. The new chip is 2 times faster")
+    assert ep.story_segments[1].text.startswith("The new chip is 2 times faster")
     assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "story 2"]
 
 
