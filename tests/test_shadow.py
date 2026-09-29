@@ -265,14 +265,35 @@ def test_summary_reads_for_a_normal_skipped_and_crashed_day():
 
 JINA = "https://r.jina.ai/"
 PAGE = "ARTICLEMARKER the agent books whole trips on its own. " * 12
-TITLES = ["OpenAI ships GPT agent", "Nvidia unveils inference chip", "EU passes AI audit rules",
-          "Anthropic raises funding for Claude", "Google Gemini tops math olympiad", "Meta open sources Llama",
-          "Mistral releases coding model", "DeepMind robot learns to cook", "Apple adds AI to Siri",
-          "Microsoft launches Copilot tutor"]
+# Feed text with enough substance to air (description_problem: 12+ words, 10+ beyond the headline).
+SUMMARIES = {
+    "OpenAI ships GPT agent": "OpenAI launched an agent inside ChatGPT that browses websites and fills in forms. "
+                              "Paying users can ask it to book a table or order groceries, and it checks before buying.",
+    "Nvidia unveils inference chip": "Nvidia unveiled a chip made for running AI models rather than training them. "
+                                     "Cloud companies expect it to lower what each chatbot answer costs them.",
+    "EU passes AI audit rules": "The European Parliament voted for independent audits of high risk AI systems. "
+                                "Companies selling hiring or credit scoring tools must prove they are tested for bias.",
+    "Anthropic raises funding for Claude": "Anthropic raised new money from investors led by a large tech fund. "
+                                           "It pays for the computing power to train and serve future Claude models.",
+    "Google Gemini tops math olympiad": "A Gemini model from Google solved most problems from this year's "
+                                        "International Mathematical Olympiad, scoring at the level of top students.",
+    "Meta open sources Llama": "Meta released its latest Llama model with open weights for researchers and companies. "
+                               "Developers can download it and run it on their own servers without paying fees.",
+    "Mistral releases coding model": "French startup Mistral released a model that writes and fixes software code. "
+                                     "It runs on a single graphics card and plugs into popular code editors.",
+    "DeepMind robot learns to cook": "Google DeepMind trained a robot arm to prepare simple meals by watching videos "
+                                     "of people cooking, then practicing each step in a simulated kitchen.",
+    "Apple adds AI to Siri": "Apple is rebuilding Siri around a large language model in its next iPhone update. "
+                             "The assistant will understand follow-up questions and act inside third-party apps.",
+    "Microsoft launches Copilot tutor": "Microsoft launched a Copilot mode for students that explains homework step "
+                                        "by step instead of giving answers. Schools can switch it on for free this fall.",
+}
+TITLES = list(SUMMARIES)
 
 
 class DeskLLM:
-    """Picks the given stories as the editor, fails as the writer (so the template writes), finds nothing as critic."""
+    """Picks the given stories as the editor (with their feed summaries), finds no duplicates, fails as the writer
+    (so the template writes), finds nothing as critic."""
 
     name, model = "desk", "desk-1"
 
@@ -282,7 +303,9 @@ class DeskLLM:
     def json(self, system, user, *, stage, schema=None):
         self.calls.append(stage)
         if stage == "editor":
-            return {"stories": [_pick(s.title, s.url) for s in self.picks], "alternates": []}
+            return {"stories": [_pick(s.title, s.url, s.summary) for s in self.picks], "alternates": []}
+        if stage == "dedupe":
+            return {"duplicates": []}
         if stage == "critic":
             return {"segments": []}
         raise RuntimeError(f"{stage}: nothing scripted")
@@ -322,7 +345,7 @@ def _stub_run(monkeypatch, tmp_path, candidates=None, llm=True):
     """A live run with fake news, voice, video, uploader, emails and web (Jina has one article; the rest is 404)."""
     monkeypatch.setenv("SHORTS_OUTPUT_DIR", str(tmp_path / "out"))
     monkeypatch.setenv("SHORTS_STATE_DIR", str(tmp_path / "state"))
-    news = [_story(t, summary="An AI model from OpenAI shipped today.") for t in TITLES]
+    news = [_story(t, summary=SUMMARIES[t]) for t in TITLES]
     candidates = news if candidates is None else candidates
     rig = SimpleNamespace(news=news, fetches=[], notes=[], http=[], llms=[], uploads=[], uploaders=[], renders=[],
                           http_before_shadow=None)
@@ -368,7 +391,8 @@ def _stub_run(monkeypatch, tmp_path, candidates=None, llm=True):
     for name in ("get", "post", "head"):  # shorts.web/coverage/sources/research all share this module
         monkeypatch.setattr(requests, name, fake_http)
     monkeypatch.setattr(requests.Session, "request", no_session)
-    rig.cfg = replace(Config.from_env().offline(), sources=["rss"], shadow=True, uploader="youtube")
+    # allow_no_ai: DeskLLM's writer fails on purpose, and a live run only takes the template script with this on
+    rig.cfg = replace(Config.from_env().offline(), sources=["rss"], shadow=True, uploader="youtube", allow_no_ai=True)
     return rig
 
 
@@ -397,6 +421,9 @@ def test_shadow_run_writes_its_folder_and_leaves_production_alone(monkeypatch, t
     assert _headlines(out / "02-picks.json") == TITLES[2:]
     seen = json.loads((tmp_path / "state" / "seen_urls.json").read_text())
     assert sorted(e["url"] for e in seen) == sorted(s.url for s in rig.news[:8])  # production's picks only
+    assert len(json.loads((tmp_path / "state" / "intros.json").read_text())) == 1  # production's intro only
+    last = json.loads((tmp_path / "state" / "last_episode.json").read_text())
+    assert [s["headline"] for s in last["segments"] if s["kind"] == "story"] == TITLES[:8]
     report = json.loads((out / "compare.json").read_text())
     assert report["picks"] == {"shared": 6, "live_only": TITLES[:2], "shadow_only": TITLES[8:]}
     assert report["writer"]["live"]["qa_passed"] and report["writer"]["shadow"]["qa_passed"]
@@ -469,6 +496,7 @@ def test_production_failing_after_the_fetch_still_gets_its_shadow(monkeypatch, t
     assert report["writer"]["live"]["qa_passed"] is False and "Quality check failed" in report["writer"]["live"]["error"]
     assert report["writer"]["shadow"]["qa_passed"] is True
     assert rig.uploads == [] and not (tmp_path / "state" / "seen_urls.json").exists()
+    assert not (tmp_path / "state" / "intros.json").exists() and not (tmp_path / "state" / "last_episode.json").exists()
     assert [subject for subject, _ in rig.notes] == ["Duck Desk shadow day 1: web research vs live"]
 
 

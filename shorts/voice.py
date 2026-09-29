@@ -132,7 +132,9 @@ def parse_lineup(specs: list[str]) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for spec in (x.strip() for x in specs):
         low = spec.lower()
-        if low in ("all", "default", "standard", "on", "yes", "true"):
+        if low in ("off", "no", "false", "none", "0"):
+            items = []
+        elif low in ("all", "default", "standard", "on", "yes", "true"):
             items = [("edge", v) for v in LINEUP_EDGE] + [("openai", v) for v in LINEUP_OPENAI]
         elif low == "edge":
             items = [("edge", v) for v in LINEUP_EDGE]

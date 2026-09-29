@@ -13,10 +13,10 @@ from shorts.selection import LLMEditor, SeenStore, pick_stories, pick_with_fallb
 from shorts.writer import LLMWriter, TemplateWriter, write_episode
 
 
-def _story(title, hours_ago=1, url=None, kind="article"):
+def _story(title, hours_ago=1, url=None, kind="article", summary="An AI model from OpenAI"):
     return Story(title=title, url=url or f"https://x/{title}", source="t",
                  published=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
-                 summary="An AI model from OpenAI", kind=kind)
+                 summary=summary, kind=kind)
 
 
 class FakeLLM:
@@ -34,7 +34,7 @@ class FakeLLM:
 
 class FakeResponse:
     def __init__(self, data, url=""):
-        self.data, self.url, self.status_code = data, url, 200
+        self.data, self.url, self.status_code, self.text = data, url, 200, json.dumps(data)
 
     def raise_for_status(self):
         pass
@@ -63,21 +63,29 @@ def test_html_to_text_keeps_links():
 
 def test_newsletter_source_reads_recent_issues(monkeypatch):
     long_html = "<p>" + "Big AI news today. " * 40 + '<a href="https://example.org/story">Read</a></p>'
+    now = datetime.now(timezone.utc)
+    recent, old = (f"{now - timedelta(hours=h):%Y-%m-%dT%H:%M:%SZ}" for h in (2, 72))
     calls = []
 
     def fake_get(url, params=None, headers=None, timeout=None):
         calls.append(url)
         assert headers["Authorization"] == "Bearer key"
         if url.endswith("/messages"):
-            return FakeResponse({"messages": [{"message_id": "m1"}, {"message_id": "m2"}]})
+            return FakeResponse({"messages": [{"message_id": "m1", "timestamp": recent},
+                                              {"message_id": "m2", "timestamp": recent},
+                                              {"message_id": "m3", "timestamp": old}]})
         if url.endswith("/m1"):
             return FakeResponse({"subject": "Today in AI", "from": "The Rundown AI <news@rundown.ai>",
-                                 "timestamp": "2026-09-26T10:00:00Z", "html": long_html})
+                                 "timestamp": recent, "html": long_html})
+        if url.endswith("/m3"):
+            return FakeResponse({"subject": "Last week in AI", "from": "The Rundown AI <news@rundown.ai>",
+                                 "timestamp": old, "html": long_html})
         return FakeResponse({"subject": "Confirm your subscription", "text": "Click to confirm."})
 
     monkeypatch.setattr(sources.requests, "get", fake_get)
     got = sources.NewsletterSource("key", "news@agentmail.to", 30).fetch()
     assert calls[0] == "https://api.agentmail.to/v0/inboxes/news@agentmail.to/messages"
+    assert not any(c.endswith("/m3") for c in calls)  # older than 30 hours: skipped from the listing
     assert len(got) == 1  # the short confirmation mail is skipped
     issue = got[0]
     assert (issue.kind, issue.source, issue.title) == ("newsletter", "The Rundown AI", "Today in AI")
@@ -89,23 +97,34 @@ def test_newsletter_source_without_key_is_empty():
 
 
 def test_llm_editor_reads_newsletters_and_maps_picks(tmp_path):
-    reply = {"stories": [{"headline": "Lab ships agent", "summary": "It books travel.", "key_fact": "3 steps",
+    summary = ("The lab's new agent books flights and hotels end to end. It asks the user to confirm "
+               "before paying and finishes a booking in 3 steps.")
+    reply = {"stories": [{"headline": "Lab ships agent", "summary": summary, "key_fact": "3 steps",
                           "url": "https://lab.ai/agent", "outlets": ["TLDR AI", "The Neuron"], "why": "big"}]}
     llm = FakeLLM(reply)
     issue = _story("TLDR AI 2026-09-26", kind="newsletter")
-    issue.body = "NEWSLETTER BODY TEXT"
+    issue.source, issue.body = "TLDR AI", "NEWSLETTER BODY TEXT"
     seen = SeenStore(tmp_path / "seen.json")
     picked = LLMEditor(llm, 30).pick([issue, _story("Feed headline")], 1, seen)
     assert "NEWSLETTER BODY TEXT" in llm.prompts[0][1] and "Feed headline" in llm.prompts[0][1]
     s = picked[0]
-    assert (s.headline, s.url, s.source, s.key_fact) == ("Lab ships agent", "https://lab.ai/agent", "TLDR AI", "3 steps")
+    # the on-screen credit is the link's publisher, never the newsletter; the newsletters stay in outlets
+    assert (s.headline, s.url, s.source, s.key_fact) == ("Lab ships agent", "https://lab.ai/agent", "lab.ai", "3 steps")
+    assert s.outlets == ["TLDR AI", "The Neuron"] and s.summary == summary
 
 
 def test_editor_falls_back_to_heuristic_when_llm_fails(tmp_path):
     seen = SeenStore(tmp_path / "seen.json")
-    picked = pick_with_fallback(LLMEditor(FakeLLM(RuntimeError("down")), 30),
-                                [_story("OpenAI model"), _story("Nvidia AI chip")], 2, seen, 30)
-    assert len(picked) == 2 and picked[0].headline
+    candidates = [
+        _story("OpenAI model", summary="OpenAI released a smaller reasoning model for developers. It costs half as "
+                                       "much per token and matches the larger model on coding benchmarks."),
+        _story("Nvidia AI chip", summary="Nvidia unveiled a data center chip built for inference. The company says "
+                                         "it serves language models three times faster using the same power."),
+        _story("Google AI agent news", summary="Google AI agent news today."),  # nothing beyond the headline
+    ]
+    picked = pick_with_fallback(LLMEditor(FakeLLM(RuntimeError("down")), 30), candidates, 3, seen, 30)
+    assert len(picked) == 2 and picked[0].headline  # two solid stories rather than a thin third one
+    assert "Google AI agent news" not in [s.title for s in picked]
 
 
 def test_seen_store_reads_old_url_list(tmp_path):

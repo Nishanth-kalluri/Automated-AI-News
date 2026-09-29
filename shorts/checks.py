@@ -100,6 +100,15 @@ def _event_words(text: str) -> set[str]:
     return words - _FILLER
 
 
+def _first_event_word(text: str) -> str:
+    """The first event word in reading order: usually who did it ("Nvidia launches ...")."""
+    for w in re.findall(r"[a-z][a-z0-9]*|\d+(?:\.\d+)?[a-z]*", re.sub(r"[\u2010-\u2015\u2212]", "-", (text or "").lower())):
+        found = _event_words(w)
+        if found:
+            return next(iter(found))
+    return ""
+
+
 def similar(a: str, b: str) -> float:
     """Share of event words two headlines have in common (0 to 1)."""
     wa, wb = _event_words(a), _event_words(b)
@@ -133,8 +142,11 @@ def same_event(a: str, b: str) -> bool:
     if shared in (wa, wb) or len(shared) / len(wa | wb) >= 0.75:
         return True
     # "Nvidia launches new platform for reining in rogue AI agents" / "Nvidia says its new AI safety
-    # platform can contain rogue agents within 'milliseconds'": four names and nouns in common.
-    if len(shared) >= 4 and len(shared) / min(len(wa), len(wb)) >= 0.7:
+    # platform can contain rogue agents within 'milliseconds'": four names and nouns in common, and the
+    # same company doing it. "Microsoft launches ..." and "Nvidia launches ..." the same thing are two events.
+    actor_a, actor_b = _first_event_word(a), _first_event_word(b)
+    if (len(shared) >= 4 and len(shared) / min(len(wa), len(wb)) >= 0.7
+            and actor_a in wb and actor_b in wa):
         return True
     # "Anthropic raises $13B at $183B valuation" / "Anthropic raises $13 billion Series F, valued at $183 billion"
     same_amount = any(w[0].isdigit() and _amount(w) >= 10 for w in shared)
@@ -270,13 +282,15 @@ def episode_material(stories: list[Story], frame: str = "") -> str:
     return " ".join(_material(s) for s in stories) + f" {len(stories)} {max(len(stories) - 1, 0)} {frame}"
 
 
-def _opening(text: str, words: int = 4) -> str:
-    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower())[:words])
+def opening(text: str, words: int = 4) -> str:
+    """How a line opens, for telling whether two intros start the same way: the first words, no punctuation."""
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower().replace("\u2019", "'"))[:words])
 
 
-def _speech_problems(text: str, banned: set[str] | tuple[str, ...] = ()) -> list[str]:
+def _speech_problems(text: str, banned: set[str] | tuple[str, ...] = (), *, outro: bool = False) -> list[str]:
+    """Only the outro may ask people to subscribe; it already does, so the intro mustn't."""
     lowered = text.lower()
-    problems = list(script_problems(text, banned, story=False))
+    problems = list(script_problems(text, banned, story=not outro))
     hype = [w for w in HYPE_WORDS if w in lowered]
     if hype:
         problems.append(f"uses hype words ({', '.join(hype)})")
@@ -309,14 +323,14 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
                              ("outro_problem", "the outro", episode.segments[-1])):
         if seg.kind not in ("intro", "outro") or not seg.text.strip():
             continue
-        problems = _speech_problems(seg.text, banned)
+        problems = _speech_problems(seg.text, banned, outro=seg.kind == "outro")
         missing = unsupported_numbers(seg.text, everything)
         if missing:
             problems.append(f"uses {', '.join(missing)}, which is not in the story material")
         if seg.kind == "intro":
-            opening = _opening(seg.text)
-            if opening and any(_opening(old) == opening for old in recent_intros):
-                problems.append(f'opens with "{opening}", like a recent episode; use a fresh hook')
+            start = opening(seg.text)
+            if start and any(opening(old) == start for old in recent_intros):
+                problems.append(f'opens with "{start}", like a recent episode; use a fresh hook')
         if problems:
             issues.append(Issue(code, f"{where} {'; '.join(problems)}"))
     for i, (seg, story) in enumerate(zip(segs, stories)):

@@ -17,7 +17,7 @@ from typing import Protocol
 from urllib.parse import urlsplit
 
 from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, episode_material, fatal,
-                     lint_episode, predicted_seconds, unsupported_numbers)
+                     lint_episode, opening, predicted_seconds, unsupported_numbers)
 from .config import DEFAULT_OUTRO
 from .content import clean_text, is_banned_name, repetition, script_problems
 from .llm import LLM, BudgetExceeded, strict_object
@@ -283,11 +283,11 @@ class TemplateWriter:
 
     def intro(self, n: int) -> Segment:
         """Today's hook from the rotation, skipping any a recent episode opened with."""
-        recent = {" ".join(t.lower().split()[:4]) for t in self.recent_intros}
+        recent = {opening(t) for t in self.recent_intros}
         start = date.today().toordinal()
         hooks = [TEMPLATE_HOOKS[(start + k) % len(TEMPLATE_HOOKS)].format(host=self.host, show=self.show)
                  for k in range(len(TEMPLATE_HOOKS))]
-        hook = next((h for h in hooks if " ".join(h.lower().split()[:4]) not in recent), hooks[0])
+        hook = next((h for h in hooks if opening(h) not in recent), hooks[0])
         return Segment(kind="intro", text=f"{hook} Here are the AI stories you need today.")
 
     def outro(self) -> Segment:
@@ -593,9 +593,10 @@ class IntroLog:
     def __init__(self, path: Path):
         self.path = path
         try:
-            self.entries: list[dict] = json.loads(path.read_text()) if path.exists() else []
+            entries = json.loads(path.read_text()) if path.exists() else []
         except (OSError, ValueError):
-            self.entries = []
+            entries = []
+        self.entries: list[dict] = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
 
     @property
     def recent(self) -> list[str]:

@@ -14,10 +14,21 @@ from urllib.parse import urlsplit
 
 from .models import Story
 
-# The inbox's newsletters and other newsletters and aggregators that must never be named on the show.
+# The inbox's newsletters and other newsletters and aggregators that must never be credited on the show.
 # Today's newsletter senders are added to these at run time (``banned_names``).
 NEWSLETTER_NAMES = ("The Rundown", "Rundown AI", "TLDR", "Superhuman", "The Neuron", "The Algorithm",
                     "The Download", "The Batch", "Import AI", "Ben's Bites", "AI Breakfast", "AI newsletters")
+# The same names as the host must never say them. Matched with their capitals and only in forms that
+# can't be everyday words: "the algorithm", "here's the rundown", "import AI chips" and "superhuman
+# performance" are normal lines, "The Algorithm" and "Superhuman AI" are newsletters.
+_SPOKEN_NEWSLETTERS = [re.compile(p) for p in (
+    r"\bThe Rundown(?: AI)?\b(?! on\b| of\b)", r"\bRundown AI\b", r"\bTLDR(?: AI)?\b", r"\bSuperhuman AI\b",
+    # "The Algorithm" etc. are newsletters when used as a name, but a title-case headline ("The Algorithm
+    # That Beat Go") is not one, so a capitalised word right after rules the match out.
+    r"\bThe Neuron\b", r"\bThe (?:Algorithm|Download|Batch)\b(?! [A-Z])",
+    r"\bImport AI\b(?! (?:chips?|models?|tools?|systems?|software|hardware))",
+    r"\bBen's Bites\b", r"\bAI Breakfast\b",
+)]
 AGGREGATOR_NAMES = ("Hacker News", "Y Combinator News", "Reddit", "subreddit", "Techmeme")
 # Links to discussion threads, not news.
 AGGREGATOR_HOSTS = ("news.ycombinator.com", "reddit.com", "redd.it", "techmeme.com")
@@ -34,9 +45,11 @@ _BOILERPLATE = [re.compile(p, re.I) for p in (
     r"\bappeared first (?:on|in)\b",
     r"\boriginally (?:appeared|published|ran)\b",
     r"\bclick here\b",
-    r"\bread (?:more|the full|the rest)\b",
+    r"\bread more\b(?! than)",
+    r"\bread the (?:full|rest)\b",
     r"\bcontinue reading\b",
-    r"\bsponsored\b",
+    r"(?<![-\w])sponsored (?:by|content|post|section|link)\b",
+    r"\bpresented by\b",
     r"\badvertisement\b",
     r"\ball rights reserved\b",
     r"\bprivacy policy\b",
@@ -61,9 +74,10 @@ _SCRIPT_BANNED = [(re.compile(p, re.I), why) for p, why in (
     (r"\bupvot", "reads out forum upvotes"),
     (r"\bcomment (?:section|thread)s?\b", "talks about a comment thread"),
     (r"\bhacker news\b|\bhn\b", "names Hacker News"),
-    (r"\breddit\b|\bsubreddit\b|(?<![\w/])r/\w+", "names Reddit"),
-    (r"\bour (?:weekly|daily|newsletter|reporting|reporters|readers|coverage|story|stories|sister)\b",
-     "speaks as a publication"),
+    # News about Reddit the company is fine; Reddit as the source of a story isn't.
+    (r"\b(?:on|from|via|over on|across) reddit\b|\breddit(?:ors?| users?| threads?| posts?| comments?| discussions?)\b"
+     r"|\bsubreddits?\b|(?<![\w/])r/\w+", "names Reddit"),
+    (r"\bour (?:weekly|daily|newsletter|reporting|reporters|readers|coverage|sister)\b", "speaks as a publication"),
     (r"\bwe (?:reported|wrote|covered|first reported)\b", "speaks as a publication"),
 )]
 # Only the outro may ask people to subscribe or follow.
@@ -162,13 +176,16 @@ def script_problems(text: str, extra_names: set[str] | tuple[str, ...] = (), *, 
     for pattern, why in _SCRIPT_BANNED + (_STORY_ONLY_BANNED if story else []):
         if pattern.search(text or "") and why not in found:
             found.append(why)
-    low = (text or "").lower()
     for name in extra_names:
-        if len(name) > 2 and re.search(rf"(?<!\w){re.escape(name.lower())}(?!\w)", low):
-            found.append(f"names {name}")
-    for name in NEWSLETTER_NAMES:
-        if re.search(rf"(?<!\w){re.escape(name.lower())}(?!\w)", low) and f"names {name}" not in found:
-            found.append(f"names {name}")
+        # Today's senders, with their capitals. A one-word sender ("Superhuman") is also an everyday
+        # word or a company in the news, so only longer names are checked here; the patterns above
+        # still catch the newsletter's own lines.
+        if len(name.split()) > 1 and re.search(rf"(?<!\w){re.escape(name.strip())}(?!\w)", text or ""):
+            found.append(f"names {name.strip()}")
+    for pattern in _SPOKEN_NEWSLETTERS:
+        m = pattern.search(text or "")
+        if m and f"names {m.group(0)}" not in found:
+            found.append(f"names {m.group(0)}")
     return found
 
 
@@ -187,10 +204,8 @@ def repetition(text: str, headline: str = "") -> str:
                 return "says the same sentence twice"
     words = _words(text)
     head = _words(headline)
-    if len(head) >= 3:
-        needle = " ".join(head)
-        if f" {' '.join(words)} ".count(f" {needle} ") >= 2:
-            return "reads the headline twice"
+    if len(head) >= 3 and sum(words[i:i + len(head)] == head for i in range(len(words) - len(head) + 1)) >= 2:
+        return "reads the headline twice"
     seen: set[tuple[str, ...]] = set()
     for i in range(len(words) - 5):
         gram = tuple(words[i:i + 6])

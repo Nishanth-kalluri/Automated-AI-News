@@ -34,7 +34,7 @@ from .selection import HeuristicEditor, SeenStore, build_editor, drop_duplicates
 from .sources import build_sources, fetch_all
 from .upload import build_uploader
 from .visuals import StoryCards
-from .voice import build_voice, lineup, narrate
+from .voice import build_voice, lineup, narrate, parse_lineup
 from .web import TavilyCredits, build_web
 from .writer import IntroLog, build_writer, episode_json, shorten, write_episode
 
@@ -277,7 +277,7 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
         intros.add(episode.segments[0].text)
         (cfg.state_dir / "last_episode.json").write_text(episode_json(episode))  # for `shorts voices`
     voices = ""
-    if cfg.voice_lineup:
+    if parse_lineup(cfg.voice_lineup):
         log.info("      reading the script with the voice lineup")
         rows = lineup(cfg, episode, run_dir / "voices")
         voices = (f"\n\nVoice lineup: {sum('file' in r for r in rows)} of {len(rows)} voices read this script. "

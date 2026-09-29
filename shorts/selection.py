@@ -522,8 +522,14 @@ def drop_duplicates(llm: LLM | None, stories: list[Story]) -> list[Story]:
     except Exception as exc:
         log.warning("      duplicate check failed (%s); keeping the picks", exc)
         return stories
-    drop = {d.get("story", 0) - 1 for d in data.get("duplicates", [])
-            if 0 < d.get("same_as", 0) < d.get("story", 0) <= len(stories)}
+    drop = set()
+    for d in data.get("duplicates") or []:
+        try:
+            later, earlier = int(d.get("story")), int(d.get("same_as"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if 0 < earlier < later <= len(stories):
+            drop.add(later - 1)
     for i in sorted(drop):
         log.warning("      dropping %r: same event as an earlier story", stories[i].headline or stories[i].title)
     return [s for i, s in enumerate(stories) if i not in drop]
