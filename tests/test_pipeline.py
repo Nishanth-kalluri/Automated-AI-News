@@ -25,7 +25,7 @@ class FakeLLM:
     def __init__(self, reply):
         self.reply, self.prompts = reply, []
 
-    def json(self, system, user, *, stage):
+    def json(self, system, user, *, stage, schema=None):
         self.prompts.append((stage, user))
         if isinstance(self.reply, Exception):
             raise self.reply

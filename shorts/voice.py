@@ -80,19 +80,40 @@ def build_voice(cfg: Config) -> VoiceProvider:
     return SilentVoice()
 
 
-def _speak(voice: VoiceProvider, text: str, out_path: Path) -> Path:
+def _speak(voice: VoiceProvider, text: str, out_path: Path) -> tuple[Path, bool]:
+    """The clip, and whether it had to fall back to silence."""
     try:
-        return voice.speak(text, out_path)
+        return voice.speak(text, out_path), False
     except Exception as exc:
         if isinstance(voice, SilentVoice):
             raise
         log.warning("%s voice failed (%s); using silence for this segment", voice.name, exc)
-        return SilentVoice().speak(text, out_path)
+        return SilentVoice().speak(text, out_path), True
+
+
+def _cached_clip(voice: VoiceProvider, text: str, out_path: Path) -> Path | None:
+    """A clip from an earlier pass of this run with the same voice and text (after a trim, most are)."""
+    note = out_path.with_suffix(".txt")
+    if note.exists() and note.read_text() == f"{voice.name}\n{text}":
+        return next((p for p in out_path.parent.glob(out_path.name + ".*") if p.suffix in (".mp3", ".wav")), None)
+    return None
 
 
 def narrate(voice: VoiceProvider, episode: Episode, out_dir: Path) -> Voiceover:
     out_dir.mkdir(parents=True, exist_ok=True)
-    clips = [_speak(voice, seg.text, out_dir / f"seg_{i:02d}") for i, seg in enumerate(episode.segments)]
+    clips, silent = [], []
+    for i, seg in enumerate(episode.segments):
+        out_path = out_dir / f"seg_{i:02d}"
+        clip = _cached_clip(voice, seg.text, out_path)
+        if clip is None:
+            for old in out_dir.glob(out_path.name + ".*"):
+                old.unlink()
+            clip, fell_back = _speak(voice, seg.text, out_path)
+            if fell_back:
+                silent.append(i)
+            else:
+                out_path.with_suffix(".txt").write_text(f"{voice.name}\n{seg.text}")
+        clips.append(clip)
     durations = [media_duration(c) for c in clips]
 
     # Resample every clip to one format, pad a short pause after each, and join.
@@ -112,4 +133,4 @@ def narrate(voice: VoiceProvider, episode: Episode, out_dir: Path) -> Voiceover:
         timings.append((t, t + d))
         words += word_timings(seg.text, t, t + d)
         t += d + GAP
-    return Voiceover(audio, media_duration(audio), timings, words)
+    return Voiceover(audio, media_duration(audio), timings, words, silent)

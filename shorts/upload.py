@@ -7,11 +7,17 @@ import os
 from pathlib import Path
 from typing import Protocol
 
+from .checks import TITLE_MAX
 from .config import Config
 from .models import Episode, UploadResult
 
 log = logging.getLogger(__name__)
 YT_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+
+
+def youtube_title(episode: Episode) -> str:
+    """Title plus " #Shorts", cut so the hashtag always survives YouTube's 100 character limit."""
+    return f"{episode.title[:TITLE_MAX].rstrip()} #Shorts"
 
 
 class Uploader(Protocol):
@@ -29,7 +35,7 @@ class LocalUploader:
         meta = video.with_name("upload.json")
         meta.write_text(json.dumps({
             "file": video.name,
-            "title": f"{episode.title} #Shorts",
+            "title": youtube_title(episode),
             "description": episode.description,
             "tags": episode.tags,
         }, indent=2))
@@ -66,7 +72,7 @@ class YouTubeUploader:
             part="snippet,status",
             body={
                 "snippet": {
-                    "title": f"{episode.title} #Shorts"[:100],
+                    "title": youtube_title(episode),
                     "description": episode.description[:4900],
                     "tags": episode.tags,
                     "categoryId": "28",  # Science & Technology

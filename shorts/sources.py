@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import logging
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Protocol
@@ -219,34 +220,50 @@ class NewsletterSource:
 
 
 class RedditSource:
-    """Top posts of the day from AI subreddits (public JSON, no key)."""
+    """Top posts of the day from AI subreddits, via their public RSS feeds.
+
+    Reddit's logged-out JSON endpoints return 403 since 2026, while the RSS feeds still answer
+    if requests are spaced out. RSS has no scores, so posts get a flat popularity.
+    """
 
     name = "reddit"
     SUBS = ["MachineLearning", "LocalLLaMA", "singularity", "OpenAI"]
+    PAUSE_SECONDS = 2.0
 
     def fetch(self) -> list[Story]:
+        import feedparser
+
         stories: list[Story] = []
-        for sub in self.SUBS:
+        for i, sub in enumerate(self.SUBS):
+            if i:
+                time.sleep(self.PAUSE_SECONDS)
             try:
-                resp = requests.get(f"https://www.reddit.com/r/{sub}/top.json",
-                                    params={"t": "day", "limit": 15}, headers=UA, timeout=15)
+                resp = requests.get(f"https://www.reddit.com/r/{sub}/top/.rss", params={"t": "day", "limit": 15},
+                                    headers=UA, timeout=15)
                 resp.raise_for_status()
+                feed = feedparser.parse(resp.content)
             except Exception as exc:
                 log.warning("reddit: r/%s failed: %s", sub, exc)
                 continue
-            for child in resp.json().get("data", {}).get("children", []):
-                p = child.get("data", {})
-                if p.get("stickied"):
-                    continue
+            for e in feed.entries:
+                content = " ".join(c.get("value", "") for c in e.get("content", [])) or e.get("summary", "")
+                ts = e.get("published_parsed") or e.get("updated_parsed")
                 stories.append(Story(
-                    title=_clean(p.get("title", "")),
-                    url=p.get("url_overridden_by_dest") or f"https://www.reddit.com{p.get('permalink', '')}",
+                    title=_clean(e.get("title", "")),
+                    url=_reddit_link(content) or e.get("link", ""),
                     source=f"r/{sub}",
-                    published=datetime.fromtimestamp(p.get("created_utc", 0), timezone.utc),
-                    summary=_clean(p.get("selftext", ""))[:400],
-                    popularity=min(p.get("score", 0) / 2000, 1.0),
+                    published=datetime(*ts[:6], tzinfo=timezone.utc) if ts else datetime.now(timezone.utc),
+                    summary=_clean(re.sub(r"submitted by.*$", "", content, flags=re.S))[:400],
+                    popularity=0.3,
                 ))
         return stories
+
+
+def _reddit_link(content: str) -> str:
+    """The post's outbound link: the "[link]" anchor, unless it points back at Reddit."""
+    m = re.search(r'<a href="([^"]+)">\s*\[link\]\s*</a>', content or "")
+    url = html.unescape(m.group(1)) if m else ""
+    return "" if "reddit.com" in url or "redd.it" in url else url
 
 
 class SampleSource:
@@ -298,7 +315,4 @@ def fetch_all(sources: list[NewsSource]) -> list[Story]:
             got = []
         log.info("%s: %d stories", src.name, len(got))
         stories.extend(got)
-    if not stories:
-        log.warning("No stories from live sources; falling back to the offline sample set.")
-        stories = SampleSource().fetch()
     return stories

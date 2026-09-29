@@ -63,6 +63,8 @@ class Voiceover:
     # (start, end) seconds per Episode segment, same order as Episode.segments.
     segment_timings: list[tuple[float, float]]
     words: list[Word] = field(default_factory=list)
+    # Segments where the voice failed and silence was put in instead (0-based segment index).
+    silent_segments: list[int] = field(default_factory=list)
 
 
 @dataclass
