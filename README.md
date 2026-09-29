@@ -25,6 +25,21 @@ With an LLM key, the two judgement stages run as agents (`SHORTS_AGENTS=on`, the
   and numbers that aren't in the sources. Only the failing segments are rewritten; any that
   still fail get the template line for that story, not a whole-script fallback.
 
+With `SHORTS_WEB=on` (web research, off by default until the shadow week below says it helps):
+
+- The editor sees how widely the top headlines are covered right now (Hacker News points and
+  the number of outlets on Google News), can look up any event's coverage, can search the web
+  for a pick's primary source, and names up to 3 alternates.
+- **Research agents** (`research.py`), one per story and all in parallel, read the article (or
+  search for a better source), copy a few verbatim quotes and the date the event was first
+  reported, and say whether the article is really about the pick. Code keeps only quotes it
+  finds in the fetched pages and dates a page backs. A story that turns out wrong, stale or
+  thin is swapped for an alternate (at most 2 a day) when the alternate checks out better.
+- The writer and the critic work from those quotes instead of the whole article.
+
+Pages are read with Tavily (counted against `SHORTS_TAVILY_MONTHLY_CREDITS`, kept in
+`state/tavily.json`) or the free Jina reader when Tavily is off or out of credits.
+
 Every LLM call is priced and logged in `cost.json`. A run stops calling the LLM at
 `SHORTS_BUDGET_USD` (default $0.60) and the month at `SHORTS_MONTHLY_BUDGET_USD` (default $18,
 kept in `state/spend.json`); stages then use their no-key fallbacks.
@@ -64,7 +79,7 @@ Each run writes `output/<timestamp>/`:
 |-------|---------|-------|----------|--------------|
 | News | Newsletter inbox (AgentMail), RSS, Hacker News, Reddit (RSS) | `AGENTMAIL_API_KEY`, `AGENTMAIL_INBOX` | feeds only; the run fails if nothing arrives | more feeds, X lists |
 | Pick | editor agent with search tools and checked picks (`SHORTS_EDITOR_MODEL`) | `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) | keyword + freshness scoring | web search, analytics feedback |
-| Read | Tavily extracts the full article for each pick | `TAVILY_API_KEY` | newsletter summary only | |
+| Read | Tavily extracts the full article for each pick; with `SHORTS_WEB=on`, a research agent per story checks it and quotes it | `TAVILY_API_KEY` (optional with `SHORTS_WEB=on`) | newsletter summary only | |
 | Script | writer agent + critic (`SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL`), persona in `shorts/persona.md` | LLM key | template line per failing segment | LangGraph newsroom with approval |
 | Voice | edge-tts `en-US-AnaNeural` (free); script trimmed if the audio runs past 170 s | internet | silence, which fails QA | ElevenLabs designed voice |
 | Host | puppet duck, bill moves with the voice loudness | – | – | Kling AI Avatar (`SHORTS_ANIMATOR`) |
@@ -78,8 +93,8 @@ module's `build_*` function.
 ## Running daily on GitHub Actions
 
 `.github/workflows/daily-short.yml` runs at 12:47 UTC and can be started by hand from the
-Actions tab. It keeps the list of already-aired stories and the month's LLM spend on a `state`
-branch and saves the video and JSON files as a workflow artifact.
+Actions tab. It keeps the list of already-aired stories, the month's LLM spend and Tavily credits on a
+`state` branch and saves the video and JSON files as a workflow artifact.
 
 In the repository settings, under **Secrets and variables → Actions**, add:
 
@@ -94,8 +109,29 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_EDITOR_MODEL`, `SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL` | variables | optional, one role's model |
 | `SHORTS_AGENTS`, `SHORTS_MAX_REPAIRS` | variables | optional, `off` for one-shot LLM calls; repair rounds per agent (default `2`) |
 | `SHORTS_BUDGET_USD`, `SHORTS_MONTHLY_BUDGET_USD` | variables | optional, default `0.60` and `18` |
+| `SHORTS_WEB` | variable | optional, `on` for web research (see below) |
+| `SHORTS_SHADOW` | variable | optional, `on` for the shadow week (see below) |
+| `SHORTS_TAVILY_MONTHLY_CREDITS`, `SHORTS_TAVILY_RUN_CREDITS` | variables | optional, default `700` and `25` |
 | `SHORTS_UPLOADER` | variable | `youtube` once the YouTube secrets are in |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |
+
+## Trying web research: the shadow week
+
+Web research runs next to the live pipeline for a week before it airs anything:
+
+1. Leave `SHORTS_WEB` unset and set the variable `SHORTS_SHADOW=on`.
+2. Each daily run publishes the live episode as usual, then runs the web path on the same news
+   into `output/<run>/shadow/` (never uploaded, never marks stories as aired) and emails a
+   comparison: shared and different picks, what the researchers verified, how widely each
+   side's picks are covered, one fact check that judges both scripts on the same quotes, QA,
+   and cost. The shadow video is in the run's artifact; `state/shadow.jsonl` keeps a row a day.
+3. The shadow skips itself when its cost could leave too little of the monthly budget for the
+   live runs left this month. It has its own $0.60 run cap and counts toward the monthly cap.
+
+A reasonable bar to switch: the shadow finished with 8 stories and passed QA on 6 of 7 days,
+had no more unsupported claims than live on 5 days, averaged $0.50 or less, stayed on pace for
+700 Tavily credits a month, and you would have aired its picks. To switch, set `SHORTS_WEB=on`
+and remove `SHORTS_SHADOW`; to roll back, set `SHORTS_WEB=off`.
 
 ## YouTube upload setup (one time)
 

@@ -6,6 +6,12 @@ from pathlib import Path
 
 
 @dataclass
+class Evidence:
+    quote: str  # copied verbatim from ``url``, and checked in code to be there
+    url: str
+
+
+@dataclass
 class Story:
     title: str
     url: str
@@ -14,12 +20,16 @@ class Story:
     summary: str = ""
     popularity: float = 0.0  # source-provided, 0..1 (e.g. HN points)
     score: float = 0.0  # set by the heuristic editor
-    kind: str = "article"  # "article", or "newsletter" for a whole issue covering many stories
+    kind: str = "article"  # "article", "newsletter" (a whole issue covering many stories), or "web" (a search hit)
     body: str = ""  # full text: the newsletter issue, or the article once researched
     # Filled in by the editor for picked stories.
     headline: str = ""  # short headline for the on-screen card
     key_fact: str = ""  # one number or fact worth showing on screen
     outlets: list[str] = field(default_factory=list)  # every source that covered it
+    # Filled in by the research agents (SHORTS_WEB=on).
+    evidence: list[Evidence] = field(default_factory=list)
+    first_reported: str = ""  # YYYY-MM-DD, only when a fetched page backs it
+    checked: str = ""  # "", verified, thin, stale, wrong_story or failed
 
 
 @dataclass

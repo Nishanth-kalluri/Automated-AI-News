@@ -31,6 +31,10 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, "").strip() or default
 
 
+def _on(name: str, default: str) -> bool:
+    return _env(name, default).lower() not in ("off", "0", "false", "no")
+
+
 def _list(name: str, default: list[str]) -> list[str]:
     raw = _env(name)
     return [x.strip() for x in raw.split(",") if x.strip()] if raw else list(default)
@@ -53,6 +57,11 @@ class Config:
     max_repairs: int  # repair rounds per agent loop
     budget_usd: float  # per run
     monthly_budget_usd: float
+    # Phase 2: research agents with web tools, and the shadow run that compares them with the live path.
+    web: bool
+    shadow: bool
+    tavily_monthly_credits: int
+    tavily_run_credits: int
     openai_api_key: str
     anthropic_api_key: str
     # Newsletter inbox (AgentMail) and article reader (Tavily).
@@ -86,13 +95,17 @@ class Config:
             max_age_hours=float(_env("SHORTS_MAX_AGE_HOURS", "30")),
             llm_provider=provider,
             llm_model=model,
-            agents=_env("SHORTS_AGENTS", "on").lower() not in ("off", "0", "false", "no"),
+            agents=_on("SHORTS_AGENTS", "on"),
             editor_model=_env("SHORTS_EDITOR_MODEL", roles.get("editor", model)),
             writer_model=_env("SHORTS_WRITER_MODEL", roles.get("writer", model)),
             checker_model=_env("SHORTS_CHECKER_MODEL", roles.get("checker", model)),
             max_repairs=int(_env("SHORTS_MAX_REPAIRS", "2")),
             budget_usd=float(_env("SHORTS_BUDGET_USD", "0.60")),
             monthly_budget_usd=float(_env("SHORTS_MONTHLY_BUDGET_USD", "18")),
+            web=_on("SHORTS_WEB", "off"),
+            shadow=_on("SHORTS_SHADOW", "off"),
+            tavily_monthly_credits=int(_env("SHORTS_TAVILY_MONTHLY_CREDITS", "700")),
+            tavily_run_credits=int(_env("SHORTS_TAVILY_RUN_CREDITS", "25")),
             openai_api_key=openai_key,
             anthropic_api_key=anthropic_key,
             agentmail_api_key=_env("AGENTMAIL_API_KEY"),
@@ -115,4 +128,4 @@ class Config:
     def offline(self) -> "Config":
         """No network, no keys: sample news, template script, silent voice, local upload."""
         return replace(self, sources=["sample"], llm_provider="none", voice="silent",
-                       tavily_api_key="", uploader="local", notify_email="")
+                       tavily_api_key="", uploader="local", notify_email="", web=False, shadow=False)
