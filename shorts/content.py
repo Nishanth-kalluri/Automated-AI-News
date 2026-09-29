@@ -41,38 +41,41 @@ NEWSLETTER_HOSTS = ("therundown.ai", "tldr.tech", "superhuman.ai", "theneurondai
 # Sentences in source text that are about the publication, not the news. Dropped whole, so each
 # pattern needs the publication talking about itself: "a bill sponsored by a senator", "Meta changed its
 # privacy policy", "people who subscribe to Gemini" and "Gemini sorts your inbox" are news.
+_SHORT = r"(?=\s*(?:\S+\s+){0,%d}\S*\s*$)"  # the rest of the sentence is at most this many words more
 _BOILERPLATE = [re.compile(p, re.I) for p in (
-    r"\b(?:our|this|today's)\s+(?:[\w'-]+\s+){0,2}newsletters?\b",
+    r"\b(?:our|this week's|today's)\s+(?:[\w'-]+\s+){0,2}newsletters?\b|\bthis newsletter\b"
+    r"|\b(?:welcome to|thanks for reading)\s+(?:the\s+|this\s+)?(?:[\w'-]+\s+){0,2}newsletter\b",
     r"\b(?:subscribe|sign(?:ing)?[ -]up)\s+(?:to|for)\s+(?:our|this)\b",
     r"\b(?:subscribe|sign up)\s+(?:to|for)\s+the\b[^.!?]*\b(?:newsletter|podcast|channel|briefing|digest|feed)s?\b",
     r"\b(?:subscribe|sign up)(?: now| today)? here\b",
-    r"^(?:please\s+)?(?:subscribe|sign up)\b",
+    r"^(?:please\s+)?(?:subscribe|sign up)\b" + _SHORT % 6,
     r"\bto get [^.!?]*\bin your inbox\b",
     r"\b(?:delivered|straight|directly|sent)\s+(?:to|in|into)\s+your inbox\b",
     r"\bin your inbox (?:first|every|each)\b",
     r"\bappeared first (?:on|in)\b",
     r"\boriginally (?:appeared|published|ran)\b",
     r"\bclick here\b",
-    r"\bread more\b(?=\s*(?:at|on|here|from|[:\u00bb\u203a\u2192\u2026]|\.\.\.|[.!]?\s*$))",
+    r"\bread more\b(?=\s*(?:at|here|[:\u00bb\u203a\u2192\u2026]|\.\.\.|[.!]?\s*$))"
+    r"|\bread more (?:on|from) (?:(?-i:[A-Z])\w+|our|the site)\b",
     r"\bread (?:the )?(?:full|rest)\b",
     r"\bcontinue reading\b",
-    r"^(?:this (?:[\w'-]+ )?(?:is |was )?)?sponsored\b",
+    r"^(?:this (?:[\w'-]+ )?(?:is |was )?)?sponsored\b" + _SHORT % 6,
     r"\bsponsored (?:content|post|section|link|message)\b",
-    r"^(?:presented|brought to you) by\b|\bbrought to you by\b",
-    r"^advertisement\b",
+    r"^(?:presented|brought to you) by\b" + _SHORT % 6 + r"|\bbrought to you by\b",
+    r"^advertisement\b" + _SHORT % 4,
     r"\ball rights reserved\b",
     r"\bour (?:privacy policy|terms of (?:service|use))\b",
     r"\bfollow us\b",
     r"\b\d[\d,]*\s+points?\b[^.!?]{0,40}\bcomments?\b",
     r"\b(?:on|via|from) (?:hn|hacker news)\b",
-    r"\b(?:discussed|posted|shared|trending|thread|comments?|discussion)\b[^.!?]{0,20}\b(?:on|via|over on) reddit\b",
+    r"\b(?:discussed|trending|thread|discussion)\b[^.!?]{0,20}\b(?:on|over on) reddit\b",
     r"\bupvot",
     r"\bthis (?:story|article|post) (?:was|is|first|originally)\b",
 )]
 # Feed footers that are not whole sentences: "\u00a9 2026 TechCrunch. All rights reserved. For personal use
 # only.", and Ars Technica's "Read full article Comments" links.
 _FOOTER_SPANS = re.compile(r"(?:\u00a9|\bcopyright\b)\s*(?:\u00a9\s*)?\d{4}[^.]*\.?|\ball rights reserved\.?"
-                           r"|\bfor personal use only\.?|\s*\bcomments\s*$", re.I)
+                           r"|\bfor personal use only\.?|\bread (?:the )?full (?:article|story)\b(?:\s+comments)?\s*$", re.I)
 _ELLIPSIS_MARK = re.compile(r"\s*(?:\[(?:…|\.\.\.)\]|\[&#8230;\])\s*")
 
 # Things the host must never say or show. Checked in code on every spoken line, headline, key fact,
@@ -84,20 +87,33 @@ _SCRIPT_BANNED = [(re.compile(p, re.I), why) for p, why in (
     (r"\b(?:delivered|straight|directly|sent) (?:to|in|into) your inbox\b|\bin your inbox (?:first|every|each)\b"
      r"|\b(?:showed up|landed|arrived|came|hit|dropped) (?:in|into) (?:your|my|our) inbox\b|\bin (?:my|our) inbox\b",
      "talks about an inbox"),
-    (r"\b\d[\d,.]*\s*k?\s+upvotes\b", "reads out forum points or comments"),
-    (r"\b\d[\d,.]*\s*k?\s+points?\b[^.!?]{0,40}\bcomments\b", "reads out forum points or comments"),
-    (r"\b\d[\d,.]*\s*k?\s+comments\b[^.!?]{0,30}\b(?:hn|hacker news|reddit|thread|post)\b",
+    (r"\b\d[\d,.]*\s*k?\+?\s+upvotes\b", "reads out forum points or comments"),
+    # Points and comments together, or a comment count on a thread or post. "10,000 comments on AI
+    # training" (a regulator) and "the FTC points to public comments" are news.
+    (r"\b\d[\d,.]*\s*k?\+?\s+points?\b[^.!?]{0,40}\bcomments\b|\b\d[\d,.]*\s*k?\+?\s+comments\b[^.!?]{0,40}\bpoints?\b"
+     r"|\bpoints\b(?! (?:to|out)\b)[^.!?]{0,40}\bcomments\b"
+     r"|\b\d[\d,.]*\s*k?\+?\s+comments\b[^.!?]{0,30}\b(?:hn|hacker news|reddit|thread|post)\b"
+     r"|\b(?:thread|(?<!blog )post|discussion|forum|front page)s?\b[^.!?]{0,40}\b\d[\d,.]*\s*k?\+?\s+comments\b",
      "reads out forum points or comments"),
+    # A key fact is its own line: "900 comments in a day" there has nothing else around it.
+    (r"(?m)^\s*\d[\d,.]*\s*k?\+?\s+(?:comments|points|upvotes)\b", "reads out forum points or comments"),
     (r"\bupvot", "reads out forum upvotes"),
     (r"\bcomment (?:section|thread)s?\b", "talks about a comment thread"),
     (r"\bhacker news\b|\bhn\b", "names Hacker News"),
-    # News about Reddit the company ("Google pays to train on Reddit posts") is fine; Reddit as where
-    # people said something isn't.
+    # News about Reddit the company ("Google pays to train on Reddit posts, the companies said") is fine;
+    # Reddit as where people said something isn't.
     (r"\bredditors?\b|\bsubreddits?\b|(?<![\w/])r/\w+"
-     r"|\b(?:people|folks|users|commenters|fans|posters) (?:on|over on) reddit\b"
-     r"|\b(?:on|over on|via|from) reddit\b(?=[^.!?]{0,40}\b(?:say|says|said|saying|discuss\w*|thread|"
-     r"post(?:ed|ing)?|lov\w+|hat\w+|think\w*|react\w*|jok\w+|went|wild|upvot\w*)\b)"
-     r"|\breddit users? (?:are|were|say|said|seem|love|hate|think|react)\w*\b", "names Reddit"),
+     r"|\b(?:people|folks|users|commenters|fans|posters|developers|devs|engineers|researchers|critics|testers"
+     r"|some|many|others|someone) (?:on|over on|across) reddit\b"
+     r"|\b(?:on|over on|via|from) reddit\b(?=[^.!?]{0,40}\b(?:discussing|discussed|lov\w+|hat\w+|thinks?|thinking"
+     r"|react\w*|jok\w+|went wild|upvot\w*|complain\w*|furious)\b)"
+     r"|(?:^|[.!?]\s+)(?:over on|across|on|in) reddit\s*,|\bacross reddit\b|\baccording to (?:a |one )?reddit\b"
+     r"|\b(?:a|an|one|this|that)\s+(?:viral\s+|popular\s+|top\s+)?reddit\s+(?:thread|post|user|comment|discussion)s?\b"
+     r"|\b(?:viral|popular|top)\s+reddit\s+(?:threads?|posts?)\b"
+     r"|\breddit (?:threads?|posts?|users?|comments?|commenters?|discussions?) (?:(?:are|were|is|was) (?:full|split"
+     r"|divided|flooded|buzzing|calling|saying|claiming|complaining|sharing|furious|angry|convinced)\b"
+     r"|(?:claim|say|said|found|find|discover|report|reveal|suggest|complain|call|argu|accus|think|love|hate|react)\w*)",
+     "names Reddit"),
     (r"\bour (?:weekly|daily) (?:newsletter|edition|issue|roundup|briefing|digest)\b"
      r"|\bour (?:newsletter|reporting|reporters|readers|coverage|sister|weekly roundup)\b", "speaks as a publication"),
     (r"\bwe (?:reported|wrote|covered|first reported)\b", "speaks as a publication"),
@@ -105,8 +121,13 @@ _SCRIPT_BANNED = [(re.compile(p, re.I), why) for p, why in (
 # Only the outro may ask people to subscribe or follow. "People who subscribe to ChatGPT Plus" is news.
 _STORY_ONLY_BANNED = [(re.compile(
     r"(?:^|[.!?]\s+)(?:please |so |and )?(?:subscribe|follow)\b(?![-\w])"
-    r"|\b(?:hit|smash) (?:that |the )?subscribe\b|\b(?:like and|forget to|remember to|sure to) subscribe\b"
-    r"|\bfollow (?:us|for)\b|\bsubscribe (?:for|to (?:the|this|our) (?:channel|show))\b", re.I | re.M),
+    r"|\b(?:hit|smash|tap|click|press) (?:that |the )?subscribe\b"
+    r"|\bfollow (?:us|for)\b|\bsubscribe (?:for (?:more|daily|tomorrow|the latest|updates|new)|to (?:the|this|our) "
+    r"(?:channel|show))\b"
+    # Any other "subscribe" except the news form: "people who subscribe to ChatGPT Plus", "subscribe for
+    # 20 dollars a month".
+    r"|(?<!\bwho )(?<!\bthat )(?<!\busers )\bsubscrib(?:e|ing)\b(?!\s+(?:to|monthly|annually|yearly)\b)"
+    r"(?!\s+for\s+(?:\$|\d|about|around|under|just|only))", re.I | re.M),
     "asks people to subscribe")]
 
 # Friendly publisher names by domain; the "via" line on screen and the writer's "Covered by" use these.
@@ -162,9 +183,24 @@ def is_aggregator_url(url: str) -> bool:
     return _on(_host(url), AGGREGATOR_HOSTS)
 
 
-def is_newsletter_url(url: str) -> bool:
-    """A link to a newsletter's own web copy, which is never the story's source."""
+# Click-tracking hosts inside newsletters (links.tldr.tech, link.mail.beehiiv.com): they redirect to the
+# real article, and research follows them.
+_REDIRECT_LABELS = ("link", "links", "click", "clicks", "track", "tracking", "t", "r", "go", "l", "email", "mail")
+
+
+def on_newsletter_host(url: str) -> bool:
+    """Any link on a newsletter's domain, tracking redirects included: never shown or credited."""
     return _on(_host(url), NEWSLETTER_HOSTS)
+
+
+def is_newsletter_url(url: str) -> bool:
+    """A link to a newsletter's own web copy, which is never the story's source. A tracking redirect
+    isn't one: it leads to the article."""
+    host = _host(url)
+    if not _on(host, NEWSLETTER_HOSTS):
+        return False
+    labels = host.split(".")
+    return not (labels[0] in _REDIRECT_LABELS or "mail" in labels[1:-2])
 
 
 def is_banned_name(name: str, extra: tuple[str, ...] | set[str] = ()) -> bool:

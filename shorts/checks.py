@@ -385,7 +385,10 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
         elif says_little(seg.text, seg.headline):
             issues.append(Issue("says_little", "barely goes beyond the headline; say what happened, with the specifics",
                                 i))
-        copied = copied_run(seg.text, [story.body, *(e.quote for e in story.evidence)])
+        # A story picked from the keyword ranking (it has a score) keeps the feed's own summary: the
+        # outlet's words, which the show must not read out either.
+        feed_summary = [story.summary] if story.score > 0 else []
+        copied = copied_run(seg.text, [story.body, *(e.quote for e in story.evidence), *feed_summary])
         if copied:
             issues.append(Issue("copied", f'copies the article word for word ("{copied}"); say it in your own words',
                                 i))

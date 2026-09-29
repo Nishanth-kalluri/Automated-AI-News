@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import composer
 from .character import build_animator
-from .checks import TARGET_MAX_SECONDS, norm_url, same_event
+from .checks import TARGET_MAX_SECONDS, _event_words, norm_url, same_event
 from .config import Config
 from .content import banned_names, description_problem
 from .coverage import Coverage
@@ -197,6 +197,7 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     log.info("[2/9] %s editor picking up to %d of %d candidates", editor.name, n, len(candidates))
     stories = pick_with_fallback(editor, candidates, n, seen, cfg.max_age_hours, min_n)
     _enough(stories, min_n, "fresh, unused AI stories")
+    tried = [(norm_url(s.url), s.headline or s.title) for s in stories]  # before research changes any link
     for s in stories:
         log.info("      %s  (%s)", s.headline or s.title, ", ".join(s.outlets or [s.source]))
 
@@ -214,8 +215,8 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
         _dump(run_dir / "02-research.json", researcher.rows)
     checker = with_model(llm, cfg.checker_model)
     stories = _described(drop_duplicates(checker, stories))
-    if len(stories) < min_n:
-        stories = _refill(stories, min_n, n, candidates, seen, cfg.max_age_hours, researcher, checker)
+    if len(stories) <= min_n:  # short, or no spare if the writer has to leave one out
+        stories = _refill(stories, min_n, n, candidates, seen, cfg.max_age_hours, researcher, checker, tried)
     _enough(stories, min_n, "different stories with a solid description")
     rec.stories = stories
     _dump(run_dir / "02-picks.json", _story_rows(stories, with_body=True))
@@ -298,21 +299,39 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
 
 
 def _refill(stories: list[Story], min_n: int, n: int, candidates: list[Story], seen: SeenStore,
-            max_age_hours: float, researcher, checker) -> list[Story]:
-    """Before giving up on the day, top a list that the dedupe or the description check shortened back
-    up from the keyword ranking, so a day is skipped only when there really aren't enough good stories."""
-    taken = {norm_url(p.url) for p in stories} - {""}
-    pool = [s for s in HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen)
-            if not description_problem(s) and norm_url(s.url) not in taken
-            and not any(s is p or same_event(s.headline or s.title, p.headline or p.title) for p in stories)]
-    added = settle(pool, candidates, min(n - len(stories), min_n - len(stories) + 1), seen, max_age_hours)
-    if not added:
-        return stories
-    log.info("      %d stories left; adding %s from the keyword ranking", len(stories),
-             ", ".join(repr(s.headline or s.title) for s in added))
-    research(researcher, added)
-    added = [s for s in added if s.checked not in ("wrong_story", "stale")]
-    return _described(drop_duplicates(checker, stories + added))
+            max_age_hours: float, researcher, checker, tried: list[tuple[str, str]] = ()) -> list[Story]:
+    """Top up a list that is at or under the minimum from the keyword ranking, one spare over it, so a
+    day is skipped only when there really aren't enough good stories.
+
+    The pool leaves out anything already tried: the same links (before research changed them), the
+    same events, and feed stories that the kept stories' own summaries already cover.
+    """
+    taken = ({u for u, _ in tried} | {norm_url(p.url) for p in stories}) - {""}
+    heads = [h for _, h in tried] + [p.headline or p.title for p in stories]
+    covered = [_event_words(f"{p.headline or p.title} {p.summary}") for p in stories]
+
+    def fresh(s: Story) -> bool:
+        head = s.headline or s.title
+        words = _event_words(head)
+        return (not description_problem(s) and norm_url(s.url) not in taken
+                and not any(s is p for p in stories) and not any(same_event(head, h) for h in heads)
+                and not (words and any(len(words & c) / len(words) >= 0.5 for c in covered)))
+
+    pool = [s for s in HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen) if fresh(s)]
+    for _ in range(3):  # small batches: the dedupe may still remove some
+        want = min(n, min_n + 1) - len(stories)
+        if want <= 0 or not pool:
+            break
+        batch = settle(pool, candidates, want, seen, max_age_hours)
+        pool = [s for s in pool if not any(s is b for b in batch)]
+        if not batch:
+            break
+        log.info("      %d stories; adding %s from the keyword ranking", len(stories),
+                 ", ".join(repr(s.headline or s.title) for s in batch))
+        research(researcher, batch)
+        batch = [s for s in batch if s.checked not in ("wrong_story", "stale")]
+        stories = _described(drop_duplicates(checker, stories + batch))
+    return stories
 
 
 def _described(stories: list[Story]) -> list[Story]:

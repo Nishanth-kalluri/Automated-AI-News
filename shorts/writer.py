@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, _event_words, episode_material,
                      fatal, lint_episode, opening, predicted_seconds, unsupported_numbers)
 from .config import DEFAULT_OUTRO
-from .content import (clean_text, is_aggregator_url, is_banned_name, is_newsletter_url, repetition,
+from .content import (clean_text, is_aggregator_url, is_banned_name, on_newsletter_host, repetition,
                       script_problems)
 from .llm import LLM, BudgetExceeded, strict_object
 from .models import Episode, Segment, Story
@@ -188,7 +188,7 @@ def description_footer(stories: list[Story]) -> str:
     for s in stories:
         name = s.headline or s.title
         name = "" if script_problems(name) else name
-        url = "" if is_aggregator_url(s.url) or is_newsletter_url(s.url) else s.url
+        url = "" if is_aggregator_url(s.url) or on_newsletter_host(s.url) else s.url
         if name or url:
             lines.append(f"- {name}: {url}" if name and url else f"- {name or url}")
     return "\n\nSources:\n" + "\n".join(lines) + "\n\nMade with AI. #AI #AINews #Shorts"
@@ -355,12 +355,7 @@ class CriticWriter:
 
     def write(self, stories: list[Story]) -> Episode:
         self.report = {"rounds": [], "fallbacks": [], "dropped": [], "critic_errors": 0}
-        draft = self.base.draft(stories)
-        episode = assemble(draft, stories, strict=False, outro=self.base.outro)
-        items = draft.get("segments") or []
-        for i in range(len(stories)):
-            if i >= len(items) or not (items[i].get("text") or "").strip():
-                self.report["fallbacks"].append({"part": f"story {i + 1}", "why": "the writer left it out"})
+        episode = assemble(self.base.draft(stories), stories, strict=False, outro=self.base.outro)
         critic: list[Issue] = []
         for round_no in range(self.max_repairs + 1):
             issues = self.lint(episode, stories)
@@ -496,12 +491,17 @@ class CriticWriter:
         keep = [i for i in range(len(stories)) if i not in bad]
         kept_stories = [stories[i] for i in keep]
         segments = [episode.segments[0], *(episode.segments[i + 1] for i in keep), episode.segments[-1]]
-        gone = [_event_words(stories[i].headline or stories[i].title) | _event_words(episode.segments[i + 1].headline)
-                for i in bad]
+        # Words only the dropped stories have: one of them in the intro, title or description means it
+        # still promises a story that isn't in the video.
+        kept_words = set().union(set(), *(
+            _event_words(f"{s.headline or s.title} {s.summary} {s.key_fact} {seg.headline} {seg.text}")
+            for s, seg in zip(kept_stories, (episode.segments[i + 1] for i in keep))))
+        gone = [(_event_words(stories[i].headline or stories[i].title) | _event_words(episode.segments[i + 1].headline))
+                - kept_words for i in bad]
 
         def teases(text: str) -> bool:
             said = _event_words(text)
-            return any(len(words & said) >= 2 for words in gone)
+            return any(words & said for words in gone)
 
         title, description = episode.title, _own_description(episode)
         if teases(episode.segments[0].text):
@@ -620,12 +620,14 @@ def write_episode(writer: ScriptWriter, stories: list[Story], show: str, host: s
         log.warning("%s writer failed (%s); falling back to template", writer.name, exc)
         recent = getattr(writer, "recent_intros", None) or getattr(getattr(writer, "base", None), "recent_intros", ())
         return TemplateWriter(show, host, outro=outro, recent_intros=recent).write(stories)
-    report = getattr(writer, "report", {})
-    templated = {f["part"] for f in report.get("fallbacks", []) if str(f.get("part", "")).startswith("story")}
-    templated -= {f"story {d.get('story')}" for d in report.get("dropped", [])}  # left out, so not aired
     aired = len(episode.story_segments)
-    if not allow_template and aired and len(templated) * 2 > aired:
-        raise WriterFailed(f"the {writer.name} writer got only {aired - len(templated)} of {aired} stories right; "
+    if stories and not aired:
+        raise WriterFailed(f"the {writer.name} writer left out every story")
+    # What airs as a summary read out, counted on the final script.
+    templated = sum(seg.text == template_segment(story).text
+                    for seg, story in zip(episode.story_segments, episode.stories))
+    if not allow_template and templated * 2 > aired:
+        raise WriterFailed(f"the {writer.name} writer got only {aired - templated} of {aired} stories right; "
                            "not publishing a script that is mostly summaries read out")
     return episode
 

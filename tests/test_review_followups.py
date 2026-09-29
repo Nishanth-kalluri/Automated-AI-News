@@ -312,3 +312,168 @@ def test_last_episode_state_holds_the_script_not_the_articles(tmp_path):
     assert "ARTICLE TEXT" not in text and json.loads(text)["stories"] == []
     assert [s.text for s in episode_from_json(text).segments] == [s.text for s in ep.segments]
     assert isinstance(ep.segments[1], Segment)
+
+
+# --- second check: forum talk and calls to subscribe the looser rules let through ---------------
+
+@pytest.mark.parametrize("line", [
+    "A viral Reddit thread claims GPT-6 is slower.",
+    "According to a Reddit post, the model leaked early.",
+    "One Reddit user found a jailbreak within hours.",
+    "On Reddit, developers are sharing benchmarks.",
+    "Across Reddit, users are furious.",
+    "Reddit comments are split on the new model.",
+    "Developers on Reddit report faster answers.",
+    "The thread racked up 900 comments in a day.",
+    "The launch post collected 3,400 comments within a day.",
+    "It hit the front page with hundreds of points and comments.",
+    "88 comments, 412 points",
+    "Quack! Make sure you subscribe, because GPT-6 is here.",
+    "Like, share and subscribe!",
+    "Tap that subscribe button.",
+    "Consider subscribing.",
+    "Subscribe to Duck Desk for daily AI news!",
+])
+def test_forum_talk_and_calls_to_subscribe_are_caught_in_any_wording(line):
+    assert script_problems(line)
+
+
+@pytest.mark.parametrize("line", [
+    "Google will train its models on Reddit posts, the companies said.",
+    "Perplexity scraped data from Reddit, the lawsuit says.",
+    "A Reddit spokesperson said the deal is worth 60 million dollars.",
+    "In a blog post, the agency said it received 10,000 comments.",
+    "The report points out that public comments ran 3 to 1 against.",
+    "Subscribers to ChatGPT Plus get it first.",
+    "Customers who subscribe annually save 20 percent.",
+    "Businesses can subscribe for 30 dollars a month.",
+])
+def test_news_about_reddit_deals_comments_and_subscriptions_still_airs(line):
+    assert script_problems(line) == []
+
+
+def test_a_bare_comment_count_as_the_key_fact_is_forum_talk():
+    a, b = _stories()
+    ep = TemplateWriter("Duck Desk", "Quackers").write([a, b])
+    segs = list(ep.segments)
+    segs[1] = replace(segs[1], text=GOOD_A, key_fact="900 comments in a day")
+    assert any(i.code == "source_talk" and i.index == 0 for i in lint_episode(replace(ep, segments=segs), [a, b]))
+
+
+@pytest.mark.parametrize("news", [
+    "The deal gives Google access to everything posted on Reddit.",
+    "Gemini can now read more on your screen and act on it.",
+    "Advertisement revenue from AI search fell 5 percent last quarter.",
+    "Sponsored by state senator Scott Wiener, SB 53 makes labs publish safety plans.",
+    "Presented by Nvidia at GTC, the chip doubles inference speed.",
+    "Substack says this feature helps newsletters grow faster with AI.",
+    "The FTC said it received 10,000 public comments",
+])
+def test_clean_text_keeps_longer_news_sentences_that_start_like_labels(news):
+    assert clean_text(news) == news
+
+
+@pytest.mark.parametrize("label", ["Sponsored by Acme Cloud.", "Advertisement", "Subscribe now!", "Presented by Acme."])
+def test_clean_text_drops_short_sponsor_and_ad_labels(label):
+    assert clean_text(label) == ""
+
+
+# --- newsletter tracking links lead to the article ---------------------------------------------
+
+def test_tracking_links_go_to_research_but_are_never_shown():
+    tracking = "https://links.tldr.tech/abc123"
+    assert not is_newsletter_url(tracking) and not is_newsletter_url("https://link.mail.beehiiv.com/ss/c/x")
+    assert is_newsletter_url("https://tldr.tech/ai/2026-09-29")
+    reply = {"stories": [{"headline": "OpenAI ships GPT agent", "summary": "OpenAI launched an agent.", "key_fact": "",
+                          "url": tracking, "outlets": ["TLDR AI"], "why": ""}]}
+    story = LLMEditor.to_stories(reply, [], 1, quiet=True)[0]
+    assert story.url == tracking and story.source == ""  # research follows it to the article
+    assert tracking not in description_footer([story])
+
+
+# --- refill: new events only, a spare, more than one batch -------------------------------------
+
+class _Dedupe:
+    """A dedupe model that removes the first refill story as a duplicate."""
+
+    name, model = "scripted", "scripted-1"
+
+    def __init__(self):
+        self.calls = 0
+
+    def json(self, system, user, *, stage, schema=None):
+        self.calls += 1
+        return {"duplicates": [{"story": 4, "same_as": 1}]} if self.calls == 1 else {"duplicates": []}
+
+
+def test_refill_skips_feed_copies_of_the_kept_stories_and_tries_another_batch(tmp_path):
+    titles = ["OpenAI ships GPT agent", "EU passes AI audit rules", "Google Gemini tops math olympiad",
+              "Meta open sources Llama", "Anthropic raises funding for Claude", "Nvidia unveils inference chip"]
+    candidates = [_news(t, hours_ago=i + 1) for i, t in enumerate(titles)]
+    copy = _story("OpenAI agent inside ChatGPT browses websites and fills in forms", hours_ago=1,
+                  summary="OpenAI's new agent in ChatGPT can browse websites, fill in forms and book tables for "
+                          "paying users, checking with them before it buys anything.")
+    candidates.append(copy)
+    kept = [replace(c, headline=c.title) for c in candidates[:3]]
+    got = pipeline._refill(kept, 4, 8, candidates, SeenStore(tmp_path / "seen.json"), 48, _Reader(), _Dedupe())
+    titles_got = [s.title for s in got]
+    assert copy.title not in titles_got  # the kept OpenAI story's summary already covers it
+    # the dedupe removed the first refill story, and the next batch replaced it
+    assert len(got) == 5 and len(set(titles_got) & set(titles[3:])) == 2
+
+
+def test_refill_at_the_minimum_adds_one_spare(tmp_path):
+    titles = ["OpenAI ships GPT agent", "EU passes AI audit rules", "Google Gemini tops math olympiad",
+              "Meta open sources Llama", "Anthropic raises funding for Claude", "Nvidia unveils inference chip"]
+    candidates = [_news(t, hours_ago=i + 1) for i, t in enumerate(titles)]
+    kept = [replace(c, headline=c.title) for c in candidates[:4]]
+    got = pipeline._refill(kept, 4, 8, candidates, SeenStore(tmp_path / "seen.json"), 48, _Reader(), None)
+    assert len(got) == 5
+
+
+# --- the writer: what counts as template text, what a dropped story leaves behind ----------------
+
+def test_a_draft_gap_that_a_repair_fills_is_not_counted_as_template_text():
+    draft = _script(GOOD_A, GOOD_B)
+    draft["segments"] = draft["segments"][:1]
+    flagged = {"intro": [], "outro": [], "segments": [{"story": 2, "unsupported": [], "quality": ["reads the summary"]}]}
+    repair = {"intro": "", "outro": "",
+              "segments": [{"story": 2, "headline": "Chip is faster", "key_fact": "2x faster", "text": GOOD_B}]}
+    llm = ScriptedLLM(draft, flagged, repair, NO_ISSUES)
+    writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=1)
+    ep = write_episode(writer, _stories(), "Duck Desk", "Quackers", allow_template=False)
+    assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]
+
+
+def test_a_script_with_every_story_left_out_is_a_failure():
+    stories = [_lazy_story()]
+    forum = ("Over on Reddit, users say GPT-6 now gives shorter answers than GPT-5 did. OpenAI says it is looking "
+             "into the reports and will share an update soon. People notice quickly when a model changes.")
+    llm = ScriptedLLM({"title": "Lazy", "description": "One story.", "tags": [], "intro": "Quack! Big day.",
+                       "segments": [{"headline": "GPT-6 feels lazy", "key_fact": "", "text": forum}], "outro": ""},
+                      NO_ISSUES)
+    writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0)
+    with pytest.raises(WriterFailed, match="left out every story"):
+        write_episode(writer, stories, "Duck Desk", "Quackers", allow_template=True)
+
+
+def test_words_a_dropped_story_shares_with_kept_ones_do_not_count_as_a_tease():
+    stories = [*_stories(), _lazy_story()]
+    stories[1].summary += " It is built for chatbots like GPT-6."
+    forum = ("Over on Reddit, users say GPT-6 now gives shorter answers than GPT-5 did. OpenAI says it is looking "
+             "into the reports and will share an update soon. People notice quickly when a model changes.")
+    intro = "Quack! A travel agent books trips, and a faster chip for GPT-6 is here."
+    llm = ScriptedLLM(_script(GOOD_A, GOOD_B, forum, intro=intro), NO_ISSUES)
+    writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0)
+    ep = writer.write(stories)
+    assert len(ep.story_segments) == 2 and ep.segments[0].text == intro  # GPT-6 is in a kept story too
+
+
+def test_a_ranked_feed_story_read_out_as_template_text_is_left_out():
+    a, b = _stories()
+    b.score = 1.0  # picked from the keyword ranking: its summary is the outlet's own words
+    flagged = {"intro": [], "outro": [], "segments": [{"story": 2, "unsupported": ["5 times"], "quality": []}]}
+    llm = ScriptedLLM(_script(GOOD_A, GOOD_B.replace("2 times", "5 times")), flagged)
+    writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0)
+    ep = writer.write([a, b])
+    assert [d["story"] for d in writer.report["dropped"]] == [2] and len(ep.story_segments) == 1
