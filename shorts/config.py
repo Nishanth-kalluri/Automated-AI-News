@@ -21,6 +21,9 @@ DEFAULT_RSS_FEEDS = [
     "https://blog.google/technology/ai/rss/",
     "https://huggingface.co/blog/feed.xml",
 ]
+DEFAULT_OUTRO = "Subscribe so you don't get lost in the storm of AI news. That's the news from the pond. See you tomorrow!"
+DEFAULT_OPENAI_TTS_INSTRUCTIONS = ("You are {host}, a small, cheerful cartoon duck who anchors a daily AI news show. "
+                                   "Sound bright, playful and warm, with an upbeat, quick pace and clear diction.")
 DEFAULT_LLM_MODELS = {"openai": "gpt-5", "anthropic": "claude-opus-5"}
 # Per-role defaults when SHORTS_LLM_MODEL isn't set. A role model the account can't use falls
 # back to the base model above on the first call.
@@ -44,11 +47,14 @@ def _list(name: str, default: list[str]) -> list[str]:
 class Config:
     sources: list[str]
     rss_feeds: list[str]
-    stories_per_video: int
+    stories_per_video: int  # at most; fewer when there aren't enough solid stories
+    min_stories: int  # below this, the day is skipped rather than padded with weak stories
     max_age_hours: float
     # LLM that picks stories and writes the script: openai, anthropic, or none (templates).
     llm_provider: str
     llm_model: str
+    # Without an LLM the script would be feed text read out by a template: skipped unless this is on.
+    allow_no_ai: bool
     # Agent loops (repair rounds, tool use) on top of the LLM stages; off means one-shot calls.
     agents: bool
     editor_model: str
@@ -70,9 +76,15 @@ class Config:
     tavily_api_key: str
     show_name: str
     host_name: str
-    voice: str
+    outro: str  # the fixed last line: subscribe ask and sign-off
+    voice: str  # edge, openai or silent
     edge_voice: str
     edge_rate: str
+    openai_voice: str
+    openai_tts_model: str
+    openai_tts_instructions: str
+    # Extra voices to read the finished script with, for comparing voices ("all" for the standard set).
+    voice_lineup: list[str]
     animator: str
     x264_preset: str
     uploader: str
@@ -89,12 +101,16 @@ class Config:
         model = _env("SHORTS_LLM_MODEL", DEFAULT_LLM_MODELS.get(provider, ""))
         roles = {} if _env("SHORTS_LLM_MODEL") else DEFAULT_ROLE_MODELS.get(provider, {})
         return cls(
-            sources=_list("SHORTS_SOURCES", ["newsletter", "rss", "hackernews", "reddit"]),
+            # Hacker News and Reddit are discussion sites, not news; they're opt-in. Hacker News still
+            # helps rank stories through the coverage lookup when SHORTS_WEB is on.
+            sources=_list("SHORTS_SOURCES", ["newsletter", "rss"]),
             rss_feeds=_list("SHORTS_RSS_FEEDS", DEFAULT_RSS_FEEDS),
             stories_per_video=int(_env("SHORTS_STORIES_PER_VIDEO", "8")),
+            min_stories=int(_env("SHORTS_MIN_STORIES", "4")),
             max_age_hours=float(_env("SHORTS_MAX_AGE_HOURS", "30")),
             llm_provider=provider,
             llm_model=model,
+            allow_no_ai=_on("SHORTS_ALLOW_NO_AI", "off"),
             agents=_on("SHORTS_AGENTS", "on"),
             editor_model=_env("SHORTS_EDITOR_MODEL", roles.get("editor", model)),
             writer_model=_env("SHORTS_WRITER_MODEL", roles.get("writer", model)),
@@ -113,9 +129,14 @@ class Config:
             tavily_api_key=_env("TAVILY_API_KEY"),
             show_name=_env("SHORTS_SHOW_NAME", "Duck Desk"),
             host_name=_env("SHORTS_HOST_NAME", "Quackers"),
+            outro=_env("SHORTS_OUTRO", DEFAULT_OUTRO),
             voice=_env("SHORTS_VOICE", "edge"),
             edge_voice=_env("SHORTS_EDGE_VOICE", "en-US-AnaNeural"),
-            edge_rate=_env("SHORTS_EDGE_RATE", "+8%"),
+            edge_rate=_env("SHORTS_EDGE_RATE", "+18%"),
+            openai_voice=_env("SHORTS_OPENAI_VOICE", "coral"),
+            openai_tts_model=_env("SHORTS_OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+            openai_tts_instructions=_env("SHORTS_OPENAI_TTS_INSTRUCTIONS", DEFAULT_OPENAI_TTS_INSTRUCTIONS),
+            voice_lineup=_list("SHORTS_VOICE_LINEUP", []),
             animator=_env("SHORTS_ANIMATOR", "puppet"),
             x264_preset=_env("SHORTS_X264_PRESET", "medium"),
             uploader=_env("SHORTS_UPLOADER", "local"),
@@ -127,5 +148,5 @@ class Config:
 
     def offline(self) -> "Config":
         """No network, no keys: sample news, template script, silent voice, local upload."""
-        return replace(self, sources=["sample"], llm_provider="none", voice="silent",
+        return replace(self, sources=["sample"], llm_provider="none", voice="silent", voice_lineup=[],
                        tavily_api_key="", uploader="local", notify_email="", web=False, shadow=False)

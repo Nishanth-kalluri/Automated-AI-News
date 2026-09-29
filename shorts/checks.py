@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .content import copied_run, is_aggregator_url, repetition, says_little, script_problems
 from .models import Episode, Story
 
 SAMPLE_URL_PREFIX = "https://example.com/sample/"
@@ -131,6 +132,10 @@ def same_event(a: str, b: str) -> bool:
         return bool(wa) and wa == wb
     if shared in (wa, wb) or len(shared) / len(wa | wb) >= 0.75:
         return True
+    # "Nvidia launches new platform for reining in rogue AI agents" / "Nvidia says its new AI safety
+    # platform can contain rogue agents within 'milliseconds'": four names and nouns in common.
+    if len(shared) >= 4 and len(shared) / min(len(wa), len(wb)) >= 0.7:
+        return True
     # "Anthropic raises $13B at $183B valuation" / "Anthropic raises $13 billion Series F, valued at $183 billion"
     same_amount = any(w[0].isdigit() and _amount(w) >= 10 for w in shared)
     return same_amount and len(shared) / min(len(wa), len(wb)) >= 0.75
@@ -147,7 +152,8 @@ def source_urls(candidates: list[Story]) -> set[str]:
 
 def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: set[str],
                 aired_headlines: list[str], max_age_hours: float,
-                now: datetime | None = None) -> list[Issue]:
+                now: datetime | None = None, min_n: int | None = None) -> list[Issue]:
+    """``n`` is how many stories to aim for; fewer than ``min_n`` (default ``n``) is a problem."""
     now = now or datetime.now(timezone.utc)
     known_urls = source_urls(candidates)
     aired_urls = {norm_url(u) for u in seen_urls} - {""}
@@ -169,6 +175,9 @@ def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: 
             match = next((h for h in aired_headlines if same_event(name, h)), None)
             if match:
                 issues.append(Issue("already_aired", f"{name!r} looks like {match!r}, which already aired", i))
+        if is_aggregator_url(s.url):
+            issues.append(Issue("not_news", f"{name!r} links to a discussion thread, not a news story; "
+                                            "use the original article or pick another story", i))
         if not url:
             issues.append(Issue("no_url", f"{name!r} has no link", i, fatal=False))
         elif url not in known_urls:
@@ -178,7 +187,7 @@ def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: 
             issues.append(Issue("stale", f"{name!r} was published {age_h:.0f} hours ago", i))
         if live_candidates and is_sample(s):
             issues.append(Issue("sample", f"{name!r} is a built-in sample story, not real news", i))
-    if len(picks) < n:
+    if len(picks) < (n if min_n is None else min_n):
         issues.append(Issue("too_few", f"only {len(picks)} of {n} stories"))
     return issues
 
@@ -261,9 +270,13 @@ def episode_material(stories: list[Story], frame: str = "") -> str:
     return " ".join(_material(s) for s in stories) + f" {len(stories)} {max(len(stories) - 1, 0)} {frame}"
 
 
-def _speech_problems(text: str) -> list[str]:
+def _opening(text: str, words: int = 4) -> str:
+    return " ".join(re.findall(r"[a-z0-9']+", (text or "").lower())[:words])
+
+
+def _speech_problems(text: str, banned: set[str] | tuple[str, ...] = ()) -> list[str]:
     lowered = text.lower()
-    problems = []
+    problems = list(script_problems(text, banned, story=False))
     hype = [w for w in HYPE_WORDS if w in lowered]
     if hype:
         problems.append(f"uses hype words ({', '.join(hype)})")
@@ -272,10 +285,15 @@ def _speech_problems(text: str) -> list[str]:
     return problems
 
 
-def lint_episode(episode: Episode, stories: list[Story], frame: str = "") -> list[Issue]:
+def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
+                 banned: set[str] | tuple[str, ...] = (), recent_intros: list[str] | tuple[str, ...] = (),
+                 description: str | None = None) -> list[Issue]:
     """Script rules the writer is told about, checked in code rather than trusted.
 
     ``frame`` is what else the intro and outro may mention: the show, the host and today's date.
+    ``banned`` adds today's newsletter names to the ones the show never says. ``recent_intros`` are
+    the last episodes' intros, which today's must not open like. ``description`` is the writer's own
+    YouTube description, without the sources footer.
     """
     issues: list[Issue] = []
     kinds = [s.kind for s in episode.segments]
@@ -291,10 +309,14 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "") -> lis
                              ("outro_problem", "the outro", episode.segments[-1])):
         if seg.kind not in ("intro", "outro") or not seg.text.strip():
             continue
-        problems = _speech_problems(seg.text)
+        problems = _speech_problems(seg.text, banned)
         missing = unsupported_numbers(seg.text, everything)
         if missing:
             problems.append(f"uses {', '.join(missing)}, which is not in the story material")
+        if seg.kind == "intro":
+            opening = _opening(seg.text)
+            if opening and any(_opening(old) == opening for old in recent_intros):
+                problems.append(f'opens with "{opening}", like a recent episode; use a fresh hook')
         if problems:
             issues.append(Issue(code, f"{where} {'; '.join(problems)}"))
     for i, (seg, story) in enumerate(zip(segs, stories)):
@@ -310,12 +332,32 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "") -> lis
             issues.append(Issue("hype", f"uses hype words ({', '.join(hype)})", i))
         if _URL_RE.search(seg.text) or re.search(r"\bwww\.", lowered):
             issues.append(Issue("url_in_narration", "reads out a web address", i))
+        talk = script_problems(f"{seg.text}\n{seg.headline}\n{seg.key_fact}", banned)
+        if talk:
+            issues.append(Issue("source_talk", "; ".join(talk) + ". Tell the news itself, as the show's host", i))
+        repeated = repetition(seg.text, seg.headline)
+        if repeated:
+            issues.append(Issue("repeats", f"{repeated}; say each thing once", i))
+        elif says_little(seg.text, seg.headline):
+            issues.append(Issue("says_little", "barely goes beyond the headline; say what happened, with the specifics",
+                                i))
+        copied = copied_run(seg.text, [story.body, *(e.quote for e in story.evidence)])
+        if copied:
+            issues.append(Issue("copied", f'copies the article word for word ("{copied}"); say it in your own words',
+                                i))
         missing = unsupported_numbers(f"{seg.text}\n{seg.key_fact}\n{seg.headline}", _material(story))
         if missing:
             issues.append(Issue("unsupported_number",
                                 f"uses {', '.join(missing)}, which is not in the story material", i))
         if len(seg.headline.split()) > 8:
             issues.append(Issue("long_headline", "headline is longer than 8 words", i, fatal=False))
+    title_talk = script_problems(episode.title, banned)
+    if title_talk:
+        issues.append(Issue("title_problem", f"the title {'; '.join(title_talk)}"))
+    if description is not None:
+        desc_talk = script_problems(description, banned)
+        if desc_talk:
+            issues.append(Issue("description_problem", f"the description {'; '.join(desc_talk)}"))
     if len(episode.title) > TITLE_MAX:
         issues.append(Issue("long_title", f"title is {len(episode.title)} characters; keep it under {TITLE_MAX}",
                             fatal=False))

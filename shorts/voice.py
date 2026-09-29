@@ -1,8 +1,15 @@
-"""Stage 5: voice every segment and time each word for the captions."""
+"""Stage 5: voice every segment and time each word for the captions.
+
+``lineup`` reads a finished script with several voices, one audio file each, so voices can be
+compared on the same words before picking one with SHORTS_VOICE / SHORTS_EDGE_VOICE / SHORTS_OPENAI_VOICE.
+"""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
+import shutil
 import wave
 from pathlib import Path
 from typing import Protocol
@@ -53,6 +60,28 @@ class EdgeVoice:
         return path
 
 
+class OpenAIVoice:
+    """OpenAI text to speech (SHORTS_VOICE=openai): more expressive, about 1.5 cents per minute of speech.
+    The instructions set the character and pace."""
+
+    name = "openai"
+
+    def __init__(self, api_key: str, voice: str, model: str, instructions: str = "", client=None):
+        if client is None:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key)
+        self.client, self.voice, self.model, self.instructions = client, voice, model, instructions
+
+    def speak(self, text: str, out_path: Path) -> Path:
+        path = out_path.with_suffix(".mp3")
+        kwargs = {"model": self.model, "voice": self.voice, "input": text, "response_format": "mp3"}
+        if self.instructions:
+            kwargs["instructions"] = self.instructions
+        path.write_bytes(self.client.audio.speech.create(**kwargs).content)
+        return path
+
+
 class SilentVoice:
     """Offline stub: silence paced like real narration, so video timing is realistic."""
 
@@ -69,15 +98,99 @@ class SilentVoice:
         return path
 
 
+def _openai_voice(cfg: Config, voice: str) -> OpenAIVoice:
+    if not cfg.openai_api_key:
+        raise ValueError("the openai voice needs OPENAI_API_KEY")
+    return OpenAIVoice(cfg.openai_api_key, voice, cfg.openai_tts_model,
+                       cfg.openai_tts_instructions.replace("{host}", cfg.host_name))
+
+
 def build_voice(cfg: Config) -> VoiceProvider:
     if cfg.voice == "edge":
         try:
             return EdgeVoice(cfg.edge_voice, cfg.edge_rate)
         except ImportError:
             log.warning("edge-tts not installed; using silent voice")
+    elif cfg.voice == "openai":
+        return _openai_voice(cfg, cfg.openai_voice)
     elif cfg.voice != "silent":
         raise ValueError(f"Unknown voice provider {cfg.voice!r}")
     return SilentVoice()
+
+
+# The standard comparison set: free Microsoft voices (the current one first, then two other child-like
+# voices and some lively adult ones), then OpenAI voices that take acting instructions.
+LINEUP_EDGE = ["en-US-AnaNeural", "en-GB-MaisieNeural", "en-US-AvaMultilingualNeural",
+               "en-US-EmmaMultilingualNeural", "en-US-AndrewMultilingualNeural", "en-US-BrianMultilingualNeural",
+               "en-US-JennyNeural", "en-US-AriaNeural", "en-US-GuyNeural", "en-AU-NatashaNeural"]
+LINEUP_OPENAI = ["coral", "nova", "fable", "shimmer"]
+
+
+def parse_lineup(specs: list[str]) -> list[tuple[str, str]]:
+    """SHORTS_VOICE_LINEUP -> [(provider, voice)]. "all" is the standard set, "edge" or "openai" its half;
+    otherwise "edge:en-US-AnaNeural", "openai:coral", or a bare name (Microsoft names contain "Neural")."""
+    out: list[tuple[str, str]] = []
+    for spec in (x.strip() for x in specs):
+        low = spec.lower()
+        if low in ("all", "default", "standard", "on", "yes", "true"):
+            items = [("edge", v) for v in LINEUP_EDGE] + [("openai", v) for v in LINEUP_OPENAI]
+        elif low == "edge":
+            items = [("edge", v) for v in LINEUP_EDGE]
+        elif low == "openai":
+            items = [("openai", v) for v in LINEUP_OPENAI]
+        elif ":" in spec:
+            provider, _, name = spec.partition(":")
+            items = [(provider.strip().lower(), name.strip())]
+        elif spec:
+            items = [("edge" if "neural" in low else "openai", spec)]
+        else:
+            items = []
+        out += [i for i in items if i not in out and i[1]]
+    return out
+
+
+def _setting(provider: str, name: str) -> str:
+    return (f"SHORTS_VOICE=edge and SHORTS_EDGE_VOICE={name}" if provider == "edge"
+            else f"SHORTS_VOICE=openai and SHORTS_OPENAI_VOICE={name}")
+
+
+def lineup(cfg: Config, episode: Episode, out_dir: Path, voices: list[tuple[str, str]] | None = None) -> list[dict]:
+    """Read ``episode`` with every lineup voice into ``out_dir``: one MP3 per voice plus voices.txt, which
+    says how to pick one. A voice that fails is listed with the error; this never raises."""
+    voices = parse_lineup(cfg.voice_lineup) if voices is None else voices
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for k, (provider, name) in enumerate(voices, 1):
+        label = f"{k:02d}-{provider}-{re.sub(r'[^A-Za-z0-9-]+', '-', name)}"
+        row = {"voice": f"{provider}:{name}", "setting": _setting(provider, name)}
+        work = out_dir / f".{label}"
+        try:
+            if provider == "edge":
+                voice: VoiceProvider = EdgeVoice(name, cfg.edge_rate)
+            elif provider == "openai":
+                voice = _openai_voice(cfg, name)
+            else:
+                raise ValueError(f"unknown voice provider {provider!r}")
+            vo = narrate(voice, episode, work)
+            if vo.silent_segments:
+                raise RuntimeError(f"the voice failed on {len(vo.silent_segments)} of {len(episode.segments)} parts")
+            mp3 = out_dir / f"{label}.mp3"
+            run_ffmpeg(["-i", str(vo.audio_path), "-codec:a", "libmp3lame", "-b:a", "128k", str(mp3)])
+            row.update(file=mp3.name, seconds=round(vo.duration, 1))
+            log.info("      %s: %.0fs", row["voice"], vo.duration)
+        except Exception as exc:
+            row["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            log.warning("      %s failed: %s", row["voice"], row["error"])
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        rows.append(row)
+    (out_dir / "voices.json").write_text(json.dumps(rows, indent=1))
+    lines = ["Every file reads the same script. To use a voice, set the repository variables shown.", ""]
+    for r in rows:
+        result = r["error"] if "error" in r else f"{r['seconds']:.0f} seconds"
+        lines += [f"{r.get('file') or r['voice']}: {result}", f"    {r['setting']}"]
+    (out_dir / "voices.txt").write_text("\n".join(lines) + "\n")
+    return rows
 
 
 def _speak(voice: VoiceProvider, text: str, out_path: Path) -> tuple[Path, bool]:

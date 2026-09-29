@@ -16,10 +16,11 @@ from typing import Protocol
 import requests
 
 from .config import Config
+from .content import clean_text, publisher_name
 from .models import Story
 
 log = logging.getLogger(__name__)
-UA = {"User-Agent": "ai-shorts/0.2 (+https://github.com/Nishanth-kalluri/Automated-AI-News)"}
+UA = {"User-Agent": "ai-shorts/0.5 (+https://github.com/Nishanth-kalluri/Automated-AI-News)"}
 AGENTMAIL_API = "https://api.agentmail.to/v0"
 NEWSLETTER_MAX_CHARS = 24_000  # per issue; newsletters run 5-15k chars once links are inlined
 
@@ -53,19 +54,21 @@ class RSSSource:
             except Exception as exc:  # one dead feed shouldn't stop the run
                 log.warning("rss: %s failed: %s", url, exc)
                 continue
-            outlet = feed.feed.get("title", url)
+            feed_title = feed.feed.get("title", "")
             for e in feed.entries:
                 ts = e.get("published_parsed") or e.get("updated_parsed")
                 published = (
                     datetime(*ts[:6], tzinfo=timezone.utc) if ts else datetime.now(timezone.utc)
                 )
+                link = e.get("link", "")
                 stories.append(
                     Story(
                         title=_clean(e.get("title", "")),
-                        url=e.get("link", ""),
-                        source=outlet,
+                        url=link,
+                        source=publisher_name(link, feed_title) or publisher_name(url, feed_title) or "News",
                         published=published,
-                        summary=_clean(e.get("summary", ""))[:600],
+                        # "The post ... appeared first on ...", "originally appeared in our newsletter": dropped
+                        summary=clean_text(_clean(e.get("summary", "")))[:600],
                     )
                 )
         return stories
@@ -89,7 +92,11 @@ def hn_search(query: str, since: datetime, min_points: int = 0, hits: int = 30) 
 
 
 class HackerNewsSource:
-    """AI-related HN stories with some traction, via the public Algolia API."""
+    """AI-related HN stories with some traction, via the public Algolia API. Opt-in (SHORTS_SOURCES).
+
+    A story comes with no summary: points and comment counts are popularity, not news, so they only
+    rank it. It goes on air only if research finds a real article to describe it.
+    """
 
     name = "hackernews"
     QUERIES = ["AI", "LLM", "OpenAI", "Anthropic", "Gemini", "machine learning"]
@@ -116,7 +123,7 @@ class HackerNewsSource:
                         url=url,
                         source="Hacker News",
                         published=datetime.fromtimestamp(h["created_at_i"], timezone.utc),
-                        summary=f"{h.get('points', 0)} points, {h.get('num_comments', 0)} comments on HN",
+                        summary="",
                         popularity=min(h.get("points", 0) / 500, 1.0),
                     ),
                 )
@@ -186,8 +193,24 @@ class NewsletterSource:
     def _get(self, path: str, **params) -> dict:
         resp = requests.get(f"{AGENTMAIL_API}/inboxes/{self.inbox}{path}", params=params,
                             headers={"Authorization": f"Bearer {self.api_key}", **UA}, timeout=30)
+        if resp.status_code >= 400:
+            log.warning("newsletter: %s %s answered %s: %s", path, params or "", resp.status_code,
+                        (resp.text or "")[:300])
         resp.raise_for_status()
         return resp.json()
+
+    def _list(self, since: datetime) -> list[dict]:
+        """The inbox listing, newest first. The ``after`` filter is only a shortcut: AgentMail answered
+        400 to it in September 2026, so a rejected filter falls back to the plain listing, and the
+        dates are checked here either way."""
+        attempts = ({"limit": 50, "after": since.strftime("%Y-%m-%dT%H:%M:%SZ")}, {"limit": 50}, {})
+        for i, params in enumerate(attempts):
+            try:
+                return self._get("/messages", **params).get("messages", [])
+            except requests.HTTPError as exc:
+                if exc.response is None or exc.response.status_code != 400 or i == len(attempts) - 1:
+                    raise
+        return []
 
     def fetch(self) -> list[Story]:
         if not (self.api_key and self.inbox):
@@ -196,13 +219,16 @@ class NewsletterSource:
         since = datetime.now(timezone.utc) - timedelta(hours=self.max_age_hours)
         stories: list[Story] = []
         try:
-            listing = self._get("/messages", limit=50, after=since.isoformat())
+            listing = self._list(since)
         except Exception as exc:
             log.warning("newsletter: listing inbox failed: %s", exc)
             return []
-        for item in listing.get("messages", []):
+        for item in listing:
             if "sent" in item.get("labels", []) or self.inbox in item.get("from", ""):
                 continue  # our own "episode ready" emails
+            listed = _timestamp(item.get("timestamp") or item.get("created_at"))
+            if listed and listed < since:
+                continue
             try:
                 msg = self._get(f"/messages/{item['message_id']}")
             except Exception as exc:
@@ -211,8 +237,9 @@ class NewsletterSource:
             body = html_to_text(msg["html"]) if msg.get("html") else (msg.get("text") or "")
             if len(body) < 400:
                 continue  # confirmations, welcome mails
-            ts = msg.get("timestamp") or item.get("timestamp")
-            published = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else datetime.now(timezone.utc)
+            published = _timestamp(msg.get("timestamp") or item.get("timestamp")) or datetime.now(timezone.utc)
+            if published < since:
+                continue
             stories.append(Story(
                 title=msg.get("subject", "(no subject)"),
                 url="",
@@ -225,8 +252,19 @@ class NewsletterSource:
         return stories
 
 
+def _timestamp(value) -> datetime | None:
+    """An AgentMail timestamp ("2026-09-29T05:44:23.373Z") as an aware datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
 class RedditSource:
-    """Top posts of the day from AI subreddits, via their public RSS feeds.
+    """Top posts of the day from AI subreddits, via their public RSS feeds. Opt-in (SHORTS_SOURCES).
 
     Reddit's logged-out JSON endpoints return 403 since 2026, while the RSS feeds still answer
     if requests are spaced out. RSS has no scores, so posts get a flat popularity.
@@ -259,7 +297,7 @@ class RedditSource:
                     url=_reddit_link(content) or e.get("link", ""),
                     source=f"r/{sub}",
                     published=datetime(*ts[:6], tzinfo=timezone.utc) if ts else datetime.now(timezone.utc),
-                    summary=_clean(re.sub(r"submitted by.*$", "", content, flags=re.S))[:400],
+                    summary=clean_text(_clean(re.sub(r"submitted by.*$", "", content, flags=re.S)))[:400],
                     popularity=0.3,
                 ))
         return stories
