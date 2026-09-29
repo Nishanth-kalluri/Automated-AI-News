@@ -424,6 +424,7 @@ def test_shadow_run_writes_its_folder_and_leaves_production_alone(monkeypatch, t
     assert len(json.loads((tmp_path / "state" / "intros.json").read_text())) == 1  # production's intro only
     last = json.loads((tmp_path / "state" / "last_episode.json").read_text())
     assert [s["headline"] for s in last["segments"] if s["kind"] == "story"] == TITLES[:8]
+    assert last["stories"] == []  # the state branch is public: the script only, no article text
     report = json.loads((out / "compare.json").read_text())
     assert report["picks"] == {"shared": 6, "live_only": TITLES[:2], "shadow_only": TITLES[8:]}
     assert report["writer"]["live"]["qa_passed"] and report["writer"]["shadow"]["qa_passed"]

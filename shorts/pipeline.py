@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import composer
 from .character import build_animator
-from .checks import TARGET_MAX_SECONDS
+from .checks import TARGET_MAX_SECONDS, norm_url, same_event
 from .config import Config
 from .content import banned_names, description_problem
 from .coverage import Coverage
@@ -212,9 +212,11 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
         rec.swaps = sum(1 for s in stories if not any(s is p for p in picked))
         rec.research = researcher.rows
         _dump(run_dir / "02-research.json", researcher.rows)
-    stories = drop_duplicates(with_model(llm, cfg.checker_model), stories)
-    stories = _described(stories)
-    _enough(stories, min_n, "stories with a solid description")
+    checker = with_model(llm, cfg.checker_model)
+    stories = _described(drop_duplicates(checker, stories))
+    if len(stories) < min_n:
+        stories = _refill(stories, min_n, n, candidates, seen, cfg.max_age_hours, researcher, checker)
+    _enough(stories, min_n, "different stories with a solid description")
     rec.stories = stories
     _dump(run_dir / "02-picks.json", _story_rows(stories, with_body=True))
     if web:
@@ -275,7 +277,8 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     if not offline:
         seen.add(stories)
         intros.add(episode.segments[0].text)
-        (cfg.state_dir / "last_episode.json").write_text(episode_json(episode))  # for `shorts voices`
+        # For `shorts voices`: the script only. The state branch is public, so no article text.
+        (cfg.state_dir / "last_episode.json").write_text(episode_json(replace(episode, stories=[])))
     voices = ""
     if parse_lineup(cfg.voice_lineup):
         log.info("      reading the script with the voice lineup")
@@ -292,6 +295,24 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
            f"Warnings: {'; '.join(report.warnings) or 'none'}{voices}")
     log.info("done: %s", video)
     return video
+
+
+def _refill(stories: list[Story], min_n: int, n: int, candidates: list[Story], seen: SeenStore,
+            max_age_hours: float, researcher, checker) -> list[Story]:
+    """Before giving up on the day, top a list that the dedupe or the description check shortened back
+    up from the keyword ranking, so a day is skipped only when there really aren't enough good stories."""
+    taken = {norm_url(p.url) for p in stories} - {""}
+    pool = [s for s in HeuristicEditor(max_age_hours).pick(candidates, len(candidates), seen)
+            if not description_problem(s) and norm_url(s.url) not in taken
+            and not any(s is p or same_event(s.headline or s.title, p.headline or p.title) for p in stories)]
+    added = settle(pool, candidates, min(n - len(stories), min_n - len(stories) + 1), seen, max_age_hours)
+    if not added:
+        return stories
+    log.info("      %d stories left; adding %s from the keyword ranking", len(stories),
+             ", ".join(repr(s.headline or s.title) for s in added))
+    research(researcher, added)
+    added = [s for s in added if s.checked not in ("wrong_story", "stale")]
+    return _described(drop_duplicates(checker, stories + added))
 
 
 def _described(stories: list[Story]) -> list[Story]:

@@ -22,44 +22,57 @@ NEWSLETTER_NAMES = ("The Rundown", "Rundown AI", "TLDR", "Superhuman", "The Neur
 # can't be everyday words: "the algorithm", "here's the rundown", "import AI chips" and "superhuman
 # performance" are normal lines, "The Algorithm" and "Superhuman AI" are newsletters.
 _SPOKEN_NEWSLETTERS = [re.compile(p) for p in (
-    r"\bThe Rundown(?: AI)?\b(?! on\b| of\b)", r"\bRundown AI\b", r"\bTLDR(?: AI)?\b", r"\bSuperhuman AI\b",
+    r"\bThe Rundown(?: AI)?\b(?! on\b| of\b)", r"\bRundown AI\b", r"\bTLDR(?: AI)?\b",
+    # "Superhuman AI could arrive by 2030" is about the technology, not the newsletter.
+    r"\bSuperhuman AI\b(?! (?:could|can|will|would|may|might|is|isn't|was|by|within|arrives?|systems?|models?)\b)",
     # "The Algorithm" etc. are newsletters when used as a name, but a title-case headline ("The Algorithm
     # That Beat Go") is not one, so a capitalised word right after rules the match out.
     r"\bThe Neuron\b", r"\bThe (?:Algorithm|Download|Batch)\b(?! [A-Z])",
-    r"\bImport AI\b(?! (?:chips?|models?|tools?|systems?|software|hardware))",
+    r"\bImport AI\b(?! [A-Z]| (?:chips?|models?|tools?|systems?|software|hardware|chats?|data))",
     r"\bBen's Bites\b", r"\bAI Breakfast\b",
 )]
 AGGREGATOR_NAMES = ("Hacker News", "Y Combinator News", "Reddit", "subreddit", "Techmeme")
 # Links to discussion threads, not news.
 AGGREGATOR_HOSTS = ("news.ycombinator.com", "reddit.com", "redd.it", "techmeme.com")
-NEWSLETTER_HOSTS = ("therundown.ai", "tldr.tech", "superhuman.ai", "theneurondaily.com", "beehiiv.com",
+NEWSLETTER_HOSTS = ("therundown.ai", "tldr.tech", "superhuman.ai", "theneurondaily.com", "theneuron.ai",
+                    "beehiiv.com", "bensbites.com", "bensbites.co", "importai.substack.com", "jack-clark.net",
                     "agentmail.to")
 
-# Sentences in source text that are about the publication, not the news. Dropped whole.
+# Sentences in source text that are about the publication, not the news. Dropped whole, so each
+# pattern needs the publication talking about itself: "a bill sponsored by a senator", "Meta changed its
+# privacy policy", "people who subscribe to Gemini" and "Gemini sorts your inbox" are news.
 _BOILERPLATE = [re.compile(p, re.I) for p in (
-    r"\bnewsletters?\b",
-    r"\bsign(?:ing)?[ -]up\b[^.!?]*\b(?:our|here|inbox|to get|for free)\b",
-    r"\bsubscribe\b[^.!?]*\b(?:our|here|free|today|now|inbox|podcast|channel)\b",
-    r"\b(?:subscribe|sign up) (?:here|now|today|for free)\b",
-    r"\bin your inbox\b",
+    r"\b(?:our|this|today's)\s+(?:[\w'-]+\s+){0,2}newsletters?\b",
+    r"\b(?:subscribe|sign(?:ing)?[ -]up)\s+(?:to|for)\s+(?:our|this)\b",
+    r"\b(?:subscribe|sign up)\s+(?:to|for)\s+the\b[^.!?]*\b(?:newsletter|podcast|channel|briefing|digest|feed)s?\b",
+    r"\b(?:subscribe|sign up)(?: now| today)? here\b",
+    r"^(?:please\s+)?(?:subscribe|sign up)\b",
+    r"\bto get [^.!?]*\bin your inbox\b",
+    r"\b(?:delivered|straight|directly|sent)\s+(?:to|in|into)\s+your inbox\b",
+    r"\bin your inbox (?:first|every|each)\b",
     r"\bappeared first (?:on|in)\b",
     r"\boriginally (?:appeared|published|ran)\b",
     r"\bclick here\b",
-    r"\bread more\b(?! than)",
-    r"\bread the (?:full|rest)\b",
+    r"\bread more\b(?=\s*(?:at|on|here|from|[:\u00bb\u203a\u2192\u2026]|\.\.\.|[.!]?\s*$))",
+    r"\bread (?:the )?(?:full|rest)\b",
     r"\bcontinue reading\b",
-    r"(?<![-\w])sponsored (?:by|content|post|section|link)\b",
-    r"\bpresented by\b",
-    r"\badvertisement\b",
+    r"^(?:this (?:[\w'-]+ )?(?:is |was )?)?sponsored\b",
+    r"\bsponsored (?:content|post|section|link|message)\b",
+    r"^(?:presented|brought to you) by\b|\bbrought to you by\b",
+    r"^advertisement\b",
     r"\ball rights reserved\b",
-    r"\bprivacy policy\b",
-    r"\bterms of (?:service|use)\b",
+    r"\bour (?:privacy policy|terms of (?:service|use))\b",
     r"\bfollow us\b",
-    r"\b\d[\d,]*\s+points?\b[^.!?]*\bcomments?\b",
-    r"\b(?:on|via|from) (?:hn|hacker news|reddit)\b",
+    r"\b\d[\d,]*\s+points?\b[^.!?]{0,40}\bcomments?\b",
+    r"\b(?:on|via|from) (?:hn|hacker news)\b",
+    r"\b(?:discussed|posted|shared|trending|thread|comments?|discussion)\b[^.!?]{0,20}\b(?:on|via|over on) reddit\b",
     r"\bupvot",
     r"\bthis (?:story|article|post) (?:was|is|first|originally)\b",
 )]
+# Feed footers that are not whole sentences: "\u00a9 2026 TechCrunch. All rights reserved. For personal use
+# only.", and Ars Technica's "Read full article Comments" links.
+_FOOTER_SPANS = re.compile(r"(?:\u00a9|\bcopyright\b)\s*(?:\u00a9\s*)?\d{4}[^.]*\.?|\ball rights reserved\.?"
+                           r"|\bfor personal use only\.?|\s*\bcomments\s*$", re.I)
 _ELLIPSIS_MARK = re.compile(r"\s*(?:\[(?:…|\.\.\.)\]|\[&#8230;\])\s*")
 
 # Things the host must never say or show. Checked in code on every spoken line, headline, key fact,
@@ -68,20 +81,33 @@ _SCRIPT_BANNED = [(re.compile(p, re.I), why) for p, why in (
     (r"\bnewsletters?\b", "mentions a newsletter"),
     (r"\boriginally (?:appeared|published|ran)\b", "says where the story originally appeared"),
     (r"\bappeared first\b", "says where the story first appeared"),
-    (r"\bin your inbox\b", "talks about an inbox"),
-    (r"\b\d[\d,.]*\s*k?\s+(?:upvotes|comments)\b", "reads out forum points or comments"),
-    (r"\bpoints\b[^.!?]{0,40}\bcomments\b", "reads out forum points or comments"),
+    (r"\b(?:delivered|straight|directly|sent) (?:to|in|into) your inbox\b|\bin your inbox (?:first|every|each)\b"
+     r"|\b(?:showed up|landed|arrived|came|hit|dropped) (?:in|into) (?:your|my|our) inbox\b|\bin (?:my|our) inbox\b",
+     "talks about an inbox"),
+    (r"\b\d[\d,.]*\s*k?\s+upvotes\b", "reads out forum points or comments"),
+    (r"\b\d[\d,.]*\s*k?\s+points?\b[^.!?]{0,40}\bcomments\b", "reads out forum points or comments"),
+    (r"\b\d[\d,.]*\s*k?\s+comments\b[^.!?]{0,30}\b(?:hn|hacker news|reddit|thread|post)\b",
+     "reads out forum points or comments"),
     (r"\bupvot", "reads out forum upvotes"),
     (r"\bcomment (?:section|thread)s?\b", "talks about a comment thread"),
     (r"\bhacker news\b|\bhn\b", "names Hacker News"),
-    # News about Reddit the company is fine; Reddit as the source of a story isn't.
-    (r"\b(?:on|from|via|over on|across) reddit\b|\breddit(?:ors?| users?| threads?| posts?| comments?| discussions?)\b"
-     r"|\bsubreddits?\b|(?<![\w/])r/\w+", "names Reddit"),
-    (r"\bour (?:weekly|daily|newsletter|reporting|reporters|readers|coverage|sister)\b", "speaks as a publication"),
+    # News about Reddit the company ("Google pays to train on Reddit posts") is fine; Reddit as where
+    # people said something isn't.
+    (r"\bredditors?\b|\bsubreddits?\b|(?<![\w/])r/\w+"
+     r"|\b(?:people|folks|users|commenters|fans|posters) (?:on|over on) reddit\b"
+     r"|\b(?:on|over on|via|from) reddit\b(?=[^.!?]{0,40}\b(?:say|says|said|saying|discuss\w*|thread|"
+     r"post(?:ed|ing)?|lov\w+|hat\w+|think\w*|react\w*|jok\w+|went|wild|upvot\w*)\b)"
+     r"|\breddit users? (?:are|were|say|said|seem|love|hate|think|react)\w*\b", "names Reddit"),
+    (r"\bour (?:weekly|daily) (?:newsletter|edition|issue|roundup|briefing|digest)\b"
+     r"|\bour (?:newsletter|reporting|reporters|readers|coverage|sister|weekly roundup)\b", "speaks as a publication"),
     (r"\bwe (?:reported|wrote|covered|first reported)\b", "speaks as a publication"),
 )]
-# Only the outro may ask people to subscribe or follow.
-_STORY_ONLY_BANNED = [(re.compile(r"\bsubscribe\b|\bfollow (?:us|for)\b", re.I), "asks people to subscribe")]
+# Only the outro may ask people to subscribe or follow. "People who subscribe to ChatGPT Plus" is news.
+_STORY_ONLY_BANNED = [(re.compile(
+    r"(?:^|[.!?]\s+)(?:please |so |and )?(?:subscribe|follow)\b(?![-\w])"
+    r"|\b(?:hit|smash) (?:that |the )?subscribe\b|\b(?:like and|forget to|remember to|sure to) subscribe\b"
+    r"|\bfollow (?:us|for)\b|\bsubscribe (?:for|to (?:the|this|our) (?:channel|show))\b", re.I | re.M),
+    "asks people to subscribe")]
 
 # Friendly publisher names by domain; the "via" line on screen and the writer's "Covered by" use these.
 PUBLISHERS = {
@@ -116,6 +142,7 @@ def clean_text(text: str) -> str:
     """Source text without the sentences that are about the publication rather than the news."""
     text = _ELLIPSIS_MARK.sub(" ", text or "")
     text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", _FOOTER_SPANS.sub(" ", text)).strip()
     kept = [s for s in _sentences(text) if not any(p.search(s) for p in _BOILERPLATE)]
     return " ".join(kept).strip()
 
@@ -135,6 +162,11 @@ def is_aggregator_url(url: str) -> bool:
     return _on(_host(url), AGGREGATOR_HOSTS)
 
 
+def is_newsletter_url(url: str) -> bool:
+    """A link to a newsletter's own web copy, which is never the story's source."""
+    return _on(_host(url), NEWSLETTER_HOSTS)
+
+
 def is_banned_name(name: str, extra: tuple[str, ...] | set[str] = ()) -> bool:
     """Whether a source name is a newsletter or an aggregator, which the show never names."""
     low = (name or "").strip().lower()
@@ -142,7 +174,11 @@ def is_banned_name(name: str, extra: tuple[str, ...] | set[str] = ()) -> bool:
         return False
     if re.match(r"r/\w+", low):
         return True
-    return any(n.lower() in low for n in (*NEWSLETTER_NAMES, *AGGREGATOR_NAMES, *extra))
+    names = [n.lower() for n in (*NEWSLETTER_NAMES, *AGGREGATOR_NAMES, *extra) if n.strip()]
+    # Also as a web address: "therundown.ai", "bensbites.com".
+    squash = re.sub(r"[^a-z0-9]", "", low)
+    return any(n in low or (len(re.sub(r"[^a-z0-9]", "", n)) >= 4 and re.sub(r"[^a-z0-9]", "", n) in squash)
+               for n in names)
 
 
 def publisher_name(url: str, feed_title: str = "") -> str:
@@ -200,6 +236,9 @@ def repetition(text: str, headline: str = "") -> str:
     sentences = [s for s in sentences if len(s.split()) >= 4]
     for i, a in enumerate(sentences):
         for b in sentences[i + 1:]:
+            # "Sonnet costs 3 dollars ... Opus costs 15 dollars ..." are two facts, not one said twice.
+            if re.findall(r"\d+(?:\.\d+)?", a) != re.findall(r"\d+(?:\.\d+)?", b):
+                continue
             if SequenceMatcher(None, a, b).ratio() >= 0.8:
                 return "says the same sentence twice"
     words = _words(text)
@@ -212,6 +251,16 @@ def repetition(text: str, headline: str = "") -> str:
         if gram in seen:
             return f'repeats "{" ".join(gram)}"'
         seen.add(gram)
+    return ""
+
+
+def shared_sentence(text: str, other: str, min_words: int = 3) -> str:
+    """A sentence of ``other`` (at least ``min_words`` words) that ``text`` says word for word, or ""."""
+    said = f" {' '.join(_words(text))} "
+    for sentence in _sentences(other or ""):
+        words = _words(sentence)
+        if len(words) >= min_words and f" {' '.join(words)} " in said:
+            return sentence
     return ""
 
 

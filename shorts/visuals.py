@@ -169,7 +169,7 @@ class StoryCards:
         l, t, r, b = CARD
         d.rounded_rectangle(CARD, radius=36, fill=PAPER)
         cx = (l + r) // 2
-        d.text((cx, t + 200), "Follow for tomorrow's", font=font(64), fill=INK, anchor="mm")
+        d.text((cx, t + 200), "Subscribe for tomorrow's", font=font(64), fill=INK, anchor="mm")
         d.text((cx, t + 290), "AI news", font=font(64), fill=ORANGE, anchor="mm")
         d.text((cx, t + 430), "Sources in the description", font=font(40, bold=False), fill=MUTED, anchor="mm")
         return img

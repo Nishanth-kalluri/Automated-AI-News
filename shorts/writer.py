@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, episode_material, fatal,
-                     lint_episode, opening, predicted_seconds, unsupported_numbers)
+from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, _event_words, episode_material,
+                     fatal, lint_episode, opening, predicted_seconds, unsupported_numbers)
 from .config import DEFAULT_OUTRO
-from .content import clean_text, is_banned_name, repetition, script_problems
+from .content import (clean_text, is_aggregator_url, is_banned_name, is_newsletter_url, repetition,
+                      script_problems)
 from .llm import LLM, BudgetExceeded, strict_object
 from .models import Episode, Segment, Story
 
@@ -38,6 +39,8 @@ TEMPLATE_HOOKS = (
 )
 # Problems about the intro or outro only; they don't open the story segments for rewriting.
 FRAME_CODES = ("missing_intro", "missing_outro", "intro_problem", "outro_problem")
+# Problems only settle() fixes, by using the standard title or description.
+SETTLE_ONLY = ("title_problem", "description_problem")
 
 WRITER_SYSTEM = """You write the script for a daily vertical YouTube Short of about 2 minutes.
 
@@ -54,9 +57,12 @@ Format:
 - Written to be heard: short sentences, no parentheses, no URLs, no emoji, spell out symbols ("percent", "dollars").
 - Only use facts given in the story material. Never invent numbers, names or quotes.
 - Say it in your own words. Never read out more than a short phrase word for word from an article.
-- You are the host of this show, not a newsletter or a news site. Never mention newsletters, Hacker News,
-  Reddit, points, upvotes or comments, and never say things like "our newsletter", "we reported" or "this story
-  originally appeared". When a source is worth naming, name the original publisher: "according to The Verge".
+- You are the host of this show, not a newsletter or a news site. Never mention newsletters or Hacker News,
+  never say what people on Reddit or in comments said, never read out points, upvotes or comment counts, and
+  never say things like "our newsletter", "we reported" or "this story originally appeared". News about Reddit
+  the company is fine. When a source is worth naming, name the original publisher: "according to The Verge".
+- The title, description, intro and segments never ask viewers to subscribe, like or follow, and never say the
+  show's sign-off: the show's own outro does both.
 
 Return JSON:
 {{"title": "YouTube title under 70 characters, no hashtags",
@@ -87,7 +93,7 @@ REVIEW_SCHEMA = strict_object({
     "intro": {"type": "array", "items": {"type": "string"},
               "description": "claims in the intro that the material does not support"},
     "outro": {"type": "array", "items": {"type": "string"},
-              "description": "claims in the outro that the material does not support"},
+              "description": "always empty: the outro is the show's fixed sign-off"},
     "segments": {"type": "array", "items": strict_object({
         "story": {"type": "integer", "description": "story number, starting at 1"},
         "unsupported": {"type": "array", "items": {"type": "string"},
@@ -99,13 +105,15 @@ REVIEW_SCHEMA = strict_object({
 
 CRITIC_SYSTEM = """You fact-check the script of a daily AI news Short against the source material for each story.
 For every story segment, list each claim (a name, number, date, quote or event) in the segment text or its key
-fact that the material does not support. Check the intro and outro the same way against all the stories.
+fact that the material does not support. Check the intro the same way against all the stories. The outro is
+the show's fixed sign-off: leave its list empty.
 Paraphrase and rounding are fine; new facts, wrong numbers and claims about the wrong company are not.
 
 Then list each segment's quality problems as TV news, under "quality":
 - it only restates the headline and never says what actually happened;
 - it repeats itself;
-- it mentions a newsletter, Hacker News, Reddit, points, upvotes or comments;
+- it mentions a newsletter or Hacker News, says what people on Reddit or in comments said, or reads out
+  points, upvotes or comment counts (news about Reddit the company is fine);
 - it talks as if the show were a newsletter or news site ("our newsletter", "we reported", "originally appeared");
 - a viewer couldn't follow it.
 Return empty lists for a segment with no problems."""
@@ -169,13 +177,20 @@ def _story_block(stories: list[Story], banned: set[str] | tuple[str, ...] = ()) 
                 f'[E{k}] "{e.quote}" ({(urlsplit(e.url).hostname or "source").removeprefix("www.")})\n'
                 for k, e in enumerate(s.evidence, 1))
         if s.body and len(s.evidence) < 2:
-            part += f"Article text:\n{s.body}\n"
+            part += f"Article text:\n{clean_text(s.body)}\n"
         out.append(part)
     return "\n".join(out)
 
 
 def description_footer(stories: list[Story]) -> str:
-    lines = [f"- {s.headline or s.title}: {s.url}" if s.url else f"- {s.headline or s.title}" for s in stories]
+    """The Sources list: each story's headline and link, never a newsletter's or forum's."""
+    lines = []
+    for s in stories:
+        name = s.headline or s.title
+        name = "" if script_problems(name) else name
+        url = "" if is_aggregator_url(s.url) or is_newsletter_url(s.url) else s.url
+        if name or url:
+            lines.append(f"- {name}: {url}" if name and url else f"- {name or url}")
     return "\n\nSources:\n" + "\n".join(lines) + "\n\nMade with AI. #AI #AINews #Shorts"
 
 
@@ -209,6 +224,11 @@ def template_segment(story: Story) -> Segment:
         sentences = sentences[1:]
     if sentences and SequenceMatcher(None, headline.lower(), sentences[0].lower().rstrip(".")).ratio() >= 0.6:
         sentences = sentences[1:]  # the summary starts by restating the headline
+    head = _event_words(headline)
+    if sentences and head and len(head & _event_words(sentences[0])) / len(head) >= 0.75:
+        # ... in other words, with more in it ("OpenAI launches GPT-6" / "OpenAI has launched GPT-6, its
+        # largest model"): the summary alone says it once; the headline is still on screen.
+        return _story_segment(story, _first_words(" ".join(sentences), STORY_WORDS[1]))
     body = " ".join(sentences)
     body = _first_words(body, STORY_WORDS[1] - len(headline.split())) if body else ""
     return _story_segment(story, f"{headline}. {body}".strip())
@@ -295,8 +315,9 @@ class TemplateWriter:
 
     def write(self, stories: list[Story]) -> Episode:
         segments = [self.intro(len(stories)), *(template_segment(s) for s in stories), self.outro()]
+        title = f"AI News Today: {stories[0].headline or stories[0].title}"[:95]
         return Episode(
-            title=f"AI News Today: {stories[0].headline or stories[0].title}"[:95],
+            title="AI News Today" if script_problems(title) else title,
             description=f"Today's top {len(stories)} AI stories in two minutes." + description_footer(stories),
             tags=["AI", "AI news", "artificial intelligence", "tech news", "shorts"],
             segments=segments,
@@ -317,9 +338,11 @@ class CriticWriter:
 
     name = "agent"
 
-    def __init__(self, llm: LLM, critic: LLM, show: str, host: str, max_repairs: int = 2, *,
+    def __init__(self, llm: LLM, critic: LLM | None, show: str, host: str, max_repairs: int = 2, *,
                  outro: str = DEFAULT_OUTRO, banned: set[str] | tuple[str, ...] = (),
                  recent_intros: list[str] | tuple[str, ...] = ()):
+        # Without a critic (SHORTS_AGENTS=off) it is the one-call writer plus the code checks and fallbacks.
+        self.name = "agent" if critic is not None else "llm"
         self.base = LLMWriter(llm, show, host, outro=outro, banned=banned, recent_intros=recent_intros)
         self.llm, self.critic, self.max_repairs = llm, critic, max_repairs
         self.template = TemplateWriter(show, host, outro=outro, recent_intros=recent_intros)
@@ -332,14 +355,19 @@ class CriticWriter:
 
     def write(self, stories: list[Story]) -> Episode:
         self.report = {"rounds": [], "fallbacks": [], "dropped": [], "critic_errors": 0}
-        episode = assemble(self.base.draft(stories), stories, strict=False, outro=self.base.outro)
+        draft = self.base.draft(stories)
+        episode = assemble(draft, stories, strict=False, outro=self.base.outro)
+        items = draft.get("segments") or []
+        for i in range(len(stories)):
+            if i >= len(items) or not (items[i].get("text") or "").strip():
+                self.report["fallbacks"].append({"part": f"story {i + 1}", "why": "the writer left it out"})
         critic: list[Issue] = []
         for round_no in range(self.max_repairs + 1):
             issues = self.lint(episode, stories)
             rules = len(fatal(issues))
             critic = []
             try:
-                critic = self.review(episode, stories)
+                critic = self.review(episode, stories) if self.critic is not None else []
                 issues += critic
             except BudgetExceeded as exc:
                 log.warning("      %s", exc)
@@ -347,9 +375,10 @@ class CriticWriter:
             except Exception as exc:  # the critic is an extra check, never a reason to fail
                 log.warning("      critic failed (%s); using the rule checks only", exc)
                 self.report["critic_errors"] += 1
-            todo = fatal(issues)
-            self.report["rounds"].append({"fatal": rules, "critic": len(todo) - rules,
-                                          "problems": [i.line()[2:] for i in todo]})
+            # A rewrite can't change the title or description; settle() replaces a bad one.
+            todo = [i for i in fatal(issues) if i.code not in SETTLE_ONLY]
+            self.report["rounds"].append({"fatal": rules, "critic": len(fatal(critic)),
+                                          "problems": [i.line()[2:] for i in fatal(issues)]})
             if not todo or round_no == self.max_repairs:
                 break
             log.info("      writer repair round %d: %s", round_no + 1, "; ".join(i.line()[2:] for i in todo))
@@ -375,11 +404,10 @@ class CriticWriter:
         system = CRITIC_SYSTEM + (CRITIC_EVIDENCE_NOTE if any(s.evidence for s in stories) else "")
         data = self.critic.json(system, user, stage="critic", schema=REVIEW_SCHEMA)
         issues = []
-        for code, key in (("intro_problem", "intro"), ("outro_problem", "outro")):
-            claims = [c for c in data.get(key, []) if c]
-            if claims:
-                issues.append(Issue(code, f"the {key} makes claims the material does not support: "
-                                          + "; ".join(claims)))
+        claims = [c for c in data.get("intro", []) if c]  # the outro is the show's own, so not checked
+        if claims:
+            issues.append(Issue("intro_problem", "the intro makes claims the material does not support: "
+                                                 + "; ".join(claims)))
         for item in data.get("segments", []):
             idx, claims = item.get("story", 0) - 1, [c for c in item.get("unsupported", []) if c]
             if 0 <= idx < len(stories) and claims:
@@ -437,14 +465,21 @@ class CriticWriter:
         episode = replace(episode, segments=segments)
         episode = self.drop_unfit(episode, stories)
         stories = episode.stories
-        if (not episode.title or unsupported_numbers(episode.title, episode_material(stories, self.frame()))
-                or script_problems(episode.title, self.base.banned)):
+        if not stories:
+            return episode
+        title_why = ("missing" if not episode.title else
+                     "; ".join(script_problems(episode.title, self.base.banned)
+                               + [f"uses {n}, which is not in the material"
+                                  for n in unsupported_numbers(episode.title, episode_material(stories, self.frame()))]))
+        if title_why:
             episode.title = self.template.write(stories).title
-            self.report["fallbacks"].append({"part": "title", "why": "missing, has unsupported numbers or "
-                                                                     "names a newsletter or forum"})
-        if script_problems(_own_description(episode), self.base.banned):
+            if script_problems(episode.title, self.base.banned):
+                episode.title = "AI News Today"
+            self.report["fallbacks"].append({"part": "title", "why": title_why})
+        desc_why = "; ".join(script_problems(_own_description(episode), self.base.banned))
+        if desc_why:
             episode.description = default_description(stories) + description_footer(stories)
-            self.report["fallbacks"].append({"part": "description", "why": "names a newsletter or forum"})
+            self.report["fallbacks"].append({"part": "description", "why": desc_why})
         return trim_to_fit(episode, TARGET_MAX_SECONDS)
 
     def drop_unfit(self, episode: Episode, stories: list[Story]) -> Episode:
@@ -452,7 +487,7 @@ class CriticWriter:
         itself or say nothing beyond its headline. Better one story fewer than a bad one."""
         issues = lint_episode(episode, stories, self.frame(), banned=self.base.banned)
         bad = sorted({i.index for i in issues
-                      if i.index is not None and i.code in ("source_talk", "repeats", "says_little")})
+                      if i.index is not None and i.code in ("source_talk", "repeats", "says_little", "copied")})
         if not bad:
             return replace(episode, stories=list(stories))
         for idx in bad:
@@ -461,15 +496,30 @@ class CriticWriter:
         keep = [i for i in range(len(stories)) if i not in bad]
         kept_stories = [stories[i] for i in keep]
         segments = [episode.segments[0], *(episode.segments[i + 1] for i in keep), episode.segments[-1]]
-        intro_words = set(episode.segments[0].text.lower().split())
-        if any(len(set((stories[i].headline or stories[i].title).lower().split()) & intro_words) >= 2 for i in bad):
+        gone = [_event_words(stories[i].headline or stories[i].title) | _event_words(episode.segments[i + 1].headline)
+                for i in bad]
+
+        def teases(text: str) -> bool:
+            said = _event_words(text)
+            return any(len(words & said) >= 2 for words in gone)
+
+        title, description = episode.title, _own_description(episode)
+        if teases(episode.segments[0].text):
             segments[0] = self.template.intro(len(kept_stories))  # the intro teased a story that's gone
             self.report["fallbacks"].append({"part": "intro", "why": "teased a story that was left out"})
-        return replace(episode, segments=segments, stories=kept_stories,
-                       description=episode.description.split("\n\nSources:\n")[0] + description_footer(kept_stories))
+        if kept_stories and teases(title):
+            title = self.template.write(kept_stories).title
+            self.report["fallbacks"].append({"part": "title", "why": "named a story that was left out"})
+        if kept_stories and teases(description):
+            description = default_description(kept_stories)
+            self.report["fallbacks"].append({"part": "description", "why": "named a story that was left out"})
+        return replace(episode, segments=segments, stories=kept_stories, title=title,
+                       description=description + description_footer(kept_stories))
 
     def shorten(self, episode: Episode, stories: list[Story], seconds_over: float) -> Episode:
         """A shorter rewrite, checked like the draft: any rewritten part that now fails keeps its old text."""
+        if self.critic is None:
+            return episode  # no rewrites without the agents; trim_to_fit cuts in code
         words = int(seconds_over * WORDS_PER_SECOND) + 4
         problem = Issue("too_long_total", f"the voiced episode runs {seconds_over:.0f}s too long; cut about {words} "
                                           "words, mostly from the longest segments")
@@ -549,7 +599,8 @@ def build_writer(llm: LLM | None, show: str, host: str, *, agents: bool = False,
     if agents:
         return CriticWriter(llm, critic or llm, show, host, max_repairs, outro=outro, banned=banned,
                             recent_intros=recent_intros)
-    return LLMWriter(llm, show, host, outro=outro, banned=banned, recent_intros=recent_intros)
+    # One writer call, no critic and no rewrites, but the same code checks and fallbacks.
+    return CriticWriter(llm, None, show, host, 0, outro=outro, banned=banned, recent_intros=recent_intros)
 
 
 class WriterFailed(RuntimeError):
@@ -559,7 +610,7 @@ class WriterFailed(RuntimeError):
 def write_episode(writer: ScriptWriter, stories: list[Story], show: str, host: str, *,
                   allow_template: bool = True, outro: str = DEFAULT_OUTRO) -> Episode:
     try:
-        return writer.write(stories)
+        episode = writer.write(stories)
     except Exception as exc:
         if isinstance(writer, TemplateWriter):
             raise
@@ -567,7 +618,16 @@ def write_episode(writer: ScriptWriter, stories: list[Story], show: str, host: s
             raise WriterFailed(f"the {writer.name} writer failed ({exc}); not publishing a template-read "
                                "script instead") from exc
         log.warning("%s writer failed (%s); falling back to template", writer.name, exc)
-        return TemplateWriter(show, host, outro=outro).write(stories)
+        recent = getattr(writer, "recent_intros", None) or getattr(getattr(writer, "base", None), "recent_intros", ())
+        return TemplateWriter(show, host, outro=outro, recent_intros=recent).write(stories)
+    report = getattr(writer, "report", {})
+    templated = {f["part"] for f in report.get("fallbacks", []) if str(f.get("part", "")).startswith("story")}
+    templated -= {f"story {d.get('story')}" for d in report.get("dropped", [])}  # left out, so not aired
+    aired = len(episode.story_segments)
+    if not allow_template and aired and len(templated) * 2 > aired:
+        raise WriterFailed(f"the {writer.name} writer got only {aired - len(templated)} of {aired} stories right; "
+                           "not publishing a script that is mostly summaries read out")
+    return episode
 
 
 def episode_json(episode: Episode) -> str:

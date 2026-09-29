@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .content import copied_run, is_aggregator_url, repetition, says_little, script_problems
+from .content import (copied_run, is_aggregator_url, is_newsletter_url, repetition, says_little, script_problems,
+                      shared_sentence)
 from .models import Episode, Story
 
 SAMPLE_URL_PREFIX = "https://example.com/sample/"
@@ -79,15 +80,11 @@ def norm_url(url: str) -> str:
     return urlunsplit(("https", parts.netloc.lower().removeprefix("www."), path, query, ""))
 
 
-def _event_words(text: str) -> set[str]:
-    """The words that identify an event: names, products, numbers.
-
-    Numbers are compared by value, however they are written: "GPT-5" and "GPT 5" give "5",
-    "$100B" and "$100 billion" give "100", "Gemini 3.0" gives "3".
-    """
+def _event_list(text: str) -> list[str]:
+    """``_event_words`` in reading order, each once."""
     text = re.sub(r"[\u2010-\u2015\u2212]", "-", (text or "").lower())  # typographic hyphens
     text = re.sub(r"(?<=\d),(?=\d{3})", "", text)
-    words = set()
+    words: list[str] = []
     for w in re.findall(r"\d+(?:\.\d+)?[a-z]*|[a-z][a-z0-9]*", text):
         number = _EVENT_NUMBER_RE.fullmatch(w)
         if number:
@@ -96,17 +93,37 @@ def _event_words(text: str) -> set[str]:
             continue
         else:
             w = w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
-        words.add(w)
-    return words - _FILLER
+        if w not in _FILLER and w not in words:
+            words.append(w)
+    return words
+
+
+def _event_words(text: str) -> set[str]:
+    """The words that identify an event: names, products, numbers.
+
+    Numbers are compared by value, however they are written: "GPT-5" and "GPT 5" give "5",
+    "$100B" and "$100 billion" give "100", "Gemini 3.0" gives "3".
+    """
+    return set(_event_list(text))
 
 
 def _first_event_word(text: str) -> str:
     """The first event word in reading order: usually who did it ("Nvidia launches ...")."""
-    for w in re.findall(r"[a-z][a-z0-9]*|\d+(?:\.\d+)?[a-z]*", re.sub(r"[\u2010-\u2015\u2212]", "-", (text or "").lower())):
-        found = _event_words(w)
-        if found:
-            return next(iter(found))
-    return ""
+    words = _event_list(text)
+    return words[0] if words else ""
+
+
+def _shared_after_name(text: str, shared: set[str]) -> int:
+    """How many shared event words come after the headline's opening run of shared words.
+
+    The opening run is who and what it is about ("Meta Ray-Ban Display glasses"); what happened comes
+    after it, so two headlines that share only the opening run are different news about one product.
+    """
+    words = _event_list(text)
+    i = 0
+    while i < len(words) and words[i] in shared:
+        i += 1
+    return sum(w in shared for w in words[i:])
 
 
 def similar(a: str, b: str) -> float:
@@ -144,9 +161,11 @@ def same_event(a: str, b: str) -> bool:
     # "Nvidia launches new platform for reining in rogue AI agents" / "Nvidia says its new AI safety
     # platform can contain rogue agents within 'milliseconds'": four names and nouns in common, and the
     # same company doing it. "Microsoft launches ..." and "Nvidia launches ..." the same thing are two events.
+    # "Meta's Ray-Ban Display glasses fail live demo" / "... go on sale" share only the product's name.
     actor_a, actor_b = _first_event_word(a), _first_event_word(b)
     if (len(shared) >= 4 and len(shared) / min(len(wa), len(wb)) >= 0.7
-            and actor_a in wb and actor_b in wa):
+            and actor_a in wb and actor_b in wa
+            and _shared_after_name(a, shared) >= 2 and _shared_after_name(b, shared) >= 2):
         return True
     # "Anthropic raises $13B at $183B valuation" / "Anthropic raises $13 billion Series F, valued at $183 billion"
     same_amount = any(w[0].isdigit() and _amount(w) >= 10 for w in shared)
@@ -190,6 +209,9 @@ def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: 
         if is_aggregator_url(s.url):
             issues.append(Issue("not_news", f"{name!r} links to a discussion thread, not a news story; "
                                             "use the original article or pick another story", i))
+        elif is_newsletter_url(s.url):
+            issues.append(Issue("not_news", f"{name!r} links to a newsletter's own page; use the original "
+                                            "article's link, or leave the link empty", i))
         if not url:
             issues.append(Issue("no_url", f"{name!r} has no link", i, fatal=False))
         elif url not in known_urls:
@@ -199,8 +221,10 @@ def check_picks(picks: list[Story], candidates: list[Story], n: int, seen_urls: 
             issues.append(Issue("stale", f"{name!r} was published {age_h:.0f} hours ago", i))
         if live_candidates and is_sample(s):
             issues.append(Issue("sample", f"{name!r} is a built-in sample story, not real news", i))
-    if len(picks) < (n if min_n is None else min_n):
-        issues.append(Issue("too_few", f"only {len(picks)} of {n} stories"))
+    need = n if min_n is None else min_n
+    if len(picks) < need:
+        issues.append(Issue("too_few", f"only {len(picks)} stories; at least {need} different, solid news events "
+                                       f"are needed (up to {n})"))
     return issues
 
 
@@ -319,6 +343,8 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
     if len(segs) != len(stories):
         issues.append(Issue("segment_count", f"{len(segs)} story segments for {len(stories)} stories"))
     everything = episode_material(stories, frame)
+    # The show's own sign-off, which only the outro says.
+    signoff = episode.segments[-1].text if episode.segments and episode.segments[-1].kind == "outro" else ""
     for code, where, seg in (("intro_problem", "the intro", episode.segments[0]),
                              ("outro_problem", "the outro", episode.segments[-1])):
         if seg.kind not in ("intro", "outro") or not seg.text.strip():
@@ -331,6 +357,8 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
             start = opening(seg.text)
             if start and any(opening(old) == start for old in recent_intros):
                 problems.append(f'opens with "{start}", like a recent episode; use a fresh hook')
+            if shared_sentence(seg.text, signoff):
+                problems.append("says the show's sign-off, which only the outro says")
         if problems:
             issues.append(Issue(code, f"{where} {'; '.join(problems)}"))
     for i, (seg, story) in enumerate(zip(segs, stories)):
@@ -350,6 +378,8 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
         if talk:
             issues.append(Issue("source_talk", "; ".join(talk) + ". Tell the news itself, as the show's host", i))
         repeated = repetition(seg.text, seg.headline)
+        if not repeated and shared_sentence(seg.text, signoff):
+            repeated = "says the show's sign-off, which the outro already says"
         if repeated:
             issues.append(Issue("repeats", f"{repeated}; say each thing once", i))
         elif says_little(seg.text, seg.headline):

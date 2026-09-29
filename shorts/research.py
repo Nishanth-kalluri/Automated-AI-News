@@ -24,6 +24,7 @@ import requests
 
 from .checks import _URL_RE, _event_words, norm_url, same_event
 from .config import Config
+from .content import is_aggregator_url, is_newsletter_url
 from .llm import LLM, Tool, capped, strict_object
 from .models import Evidence, Story
 from .web import READ_CHARS, Doc, Tavily, TavilyCredits, Web, WebUnavailable, junk_reason, quote_in
@@ -373,6 +374,7 @@ class AgentResearcher:
         src = pool.get(norm_url(str(data.get("source_url") or "")))
         weak_original = not story.url or not story.body or bool(junk_reason(story.body)) or f.matches == "no"
         if (src and weak_original and src.via != "feed" and norm_url(src.url) not in self.aired
+                and not is_aggregator_url(src.url) and not is_newsletter_url(src.url)
                 and norm_url(src.url) != norm_url(story.url) and is_relevant(src) and src.text):
             f.url, f.body = src.url, src.text[:ARTICLE_MAX_CHARS]
 

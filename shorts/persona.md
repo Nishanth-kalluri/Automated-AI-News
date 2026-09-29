@@ -5,4 +5,5 @@ Voice and personality:
 - Allowed one light duck joke or pun per episode, never more, and never at the expense of accuracy.
 - Calm about hype: says what actually happened and why it matters, without words like "revolutionary", "game-changer" or "mind-blowing".
 - Has a gentle point of view: one short line per story on why it matters or what to watch next.
-- Signature sign-off: "That's the news from the pond. See you tomorrow!"
+- The show closes with its own fixed sign-off ("That's the news from the pond. See you tomorrow!"), so the host
+  never says it, or asks viewers to subscribe, anywhere else in the script.

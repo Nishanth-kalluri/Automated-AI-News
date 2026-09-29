@@ -330,7 +330,8 @@ def test_critic_findings_that_survive_the_repairs_fall_back_per_segment():
     llm = ScriptedLLM(_script(GOOD_A, wrong_b), flagged, no_change, flagged, no_change, flagged)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=2).write(_stories())
     assert ep.story_segments[0].text == GOOD_A  # untouched
-    assert ep.story_segments[1].text.startswith("Chip is faster. The new chip is 2 times faster")  # from summary
+    # from the summary, which restates the headline, so the headline isn't read out as well
+    assert ep.story_segments[1].text.startswith("The new chip is 2 times faster")
 
 
 def test_a_claim_only_the_critic_catches_falls_back_after_the_repairs():
@@ -341,7 +342,7 @@ def test_a_claim_only_the_critic_catches_falls_back_after_the_repairs():
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=2).write(_stories())
     assert not lint_episode(replace(ep, segments=[ep.segments[0], Segment("story", claim_a, "Lab ships agent"),
                                                   *ep.segments[2:]]), _stories())  # invisible to the rules
-    assert ep.story_segments[0].text.startswith("Lab ships agent. The lab shipped")  # template line
+    assert ep.story_segments[0].text.startswith("The lab shipped")  # template line: the summary, headline once
     assert ep.story_segments[1].text == GOOD_B
     assert [c[0] for c in llm.calls].count("critic") == 3
 
@@ -355,7 +356,8 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     llm = ScriptedLLM(script, flagged, revision, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
     problems = llm.calls[2][1]
-    assert "the intro uses hype words" in problems and "400 billion" in problems and "the outro" in problems
+    assert "the intro uses hype words" in problems and "400 billion" in problems
+    assert "the outro" not in problems  # the outro is the show's own: not the critic's to fix
     assert ep.segments[0].text == "The lab's agent books travel now, plus 1 more AI story."
     assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]  # frame problems don't open the stories
     llm = ScriptedLLM(script, NO_ISSUES)
@@ -364,7 +366,8 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     no_change = {"intro": "", "outro": "", "segments": []}
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B), flagged, no_change, flagged)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
-    assert ep.segments[-1].text == TemplateWriter("Show", "Host").outro().text  # the critic's finding stuck
+    assert ep.segments[-1].text == TemplateWriter("Show", "Host").outro().text  # always the show's outro
+    assert [c[0] for c in llm.calls] == ["writer", "critic"]  # a finding on the fixed outro costs no rewrite
     assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]
 
 
@@ -420,7 +423,7 @@ def test_critic_writer_fills_a_missing_segment_instead_of_dropping_the_script():
     short["segments"] = short["segments"][:1]
     llm = ScriptedLLM(short, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=0).write(_stories())
-    assert ep.story_segments[0].text == GOOD_A and ep.story_segments[1].text.startswith("Chip is faster.")
+    assert ep.story_segments[0].text == GOOD_A and ep.story_segments[1].text.startswith("The new chip is 2 times")
     assert ep.title == "AI today"
 
 

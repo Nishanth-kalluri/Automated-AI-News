@@ -144,6 +144,7 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_STORIES_PER_VIDEO`, `SHORTS_MIN_STORIES` | variables | optional, default `8` and `4` |
 | `SHORTS_SOURCES` | variable | optional, default `newsletter,rss` |
 | `SHORTS_VOICE`, `SHORTS_EDGE_VOICE`, `SHORTS_EDGE_RATE`, `SHORTS_OPENAI_VOICE`, `SHORTS_OPENAI_TTS_MODEL` | variables | optional; see "Choosing a voice" |
+| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |
 
 ## Choosing a voice
 
@@ -154,7 +155,6 @@ each voice, and the run's download (`episode.zip`) has one MP3 per voice in `voi
 `voices.txt` with the variables to set for each. The OpenAI voices cost a few cents per
 comparison run. Locally: `python -m shorts voices --voices all` reads the last episode's script
 (`state/last_episode.json`) or `--script output/<run>/03-episode.json`.
-| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |
 
 ## Trying web research: the shadow week
 

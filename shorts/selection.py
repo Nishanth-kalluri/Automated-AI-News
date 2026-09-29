@@ -16,10 +16,9 @@ from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
-from urllib.parse import urlsplit
 
 from .checks import check_picks, fatal, norm_url, same_event, similar
-from .content import description_problem, is_aggregator_url, publisher_name
+from .content import description_problem, is_aggregator_url, is_newsletter_url, publisher_name
 from .llm import LLM, BudgetExceeded, Tool, capped, strict_object
 from .models import Story
 
@@ -99,7 +98,7 @@ def pick_stories(stories: list[Story], n: int, max_age_hours: float,
     for s in stories:
         s.score = score(s, now, max_age_hours)
     ranked = sorted((s for s in stories if s.score > 0 and s.url not in seen and s.title
-                     and s.kind == "article" and not is_aggregator_url(s.url)),
+                     and s.kind == "article" and not is_aggregator_url(s.url) and not is_newsletter_url(s.url)),
                     key=lambda s: s.score, reverse=True)
     chosen: list[Story] = []
     for s in ranked:
@@ -146,8 +145,9 @@ How to choose:
 - Every pick needs enough facts in the texts for a solid 15 second segment. Fewer, stronger stories beat
   padding: return fewer than requested rather than a thin, vague or duplicate story.
 - Use only facts present in the texts. Never invent numbers, names or quotes.
-- Summaries describe the event itself. Never mention newsletters, Hacker News, Reddit, points, upvotes or
-  comments, and never copy a newsletter's or site's lines about itself ("in our newsletter", "sign up").
+- Summaries describe the event itself. Never mention newsletters or Hacker News, never say what people on
+  Reddit or in comments said, never give points, upvotes or comment counts, and never copy a newsletter's or
+  site's lines about itself ("in our newsletter", "sign up"). News about Reddit the company is fine.
 
 Return JSON: {"stories": [ ... ]} with up to the requested number of stories, most important first.
 Every url must be copied exactly from the texts; never build or guess a link.
@@ -155,7 +155,7 @@ Each story: {
   "headline": "on-screen headline, at most 8 words",
   "summary": "3 to 5 sentences with the concrete facts from the texts: who, what, numbers, why it matters",
   "key_fact": "the single most striking number or fact, at most 7 words, or empty string",
-  "url": "the best link for the story found in the texts, preferring the original announcement or article over newsletter links; empty string if none",
+  "url": "the best link for the story found in the texts, preferring the original announcement or article over newsletter links, never the newsletter's own web page; empty string if none",
   "outlets": ["names of every newsletter or site that covered it"],
   "why": "one line on why it made the cut"
 }"""
@@ -242,8 +242,10 @@ class LLMEditor:
         for item in (data.get("stories") or [])[:n]:
             outlets = [o for o in item.get("outlets", []) if o] or ["AI newsletters"]
             url = (item.get("url") or "").strip()
+            if is_newsletter_url(url):
+                url = ""  # the newsletter's own web copy is never the source; research finds the original
             match = articles.get(norm_url(url))
-            if match and match.source not in outlets:
+            if match and match.source and match.source not in outlets:
                 outlets.append(match.source)
             picked.append(Story(
                 title=item.get("headline", "").strip(),
@@ -380,7 +382,7 @@ class AgentEditor:
         for i, d in enumerate(docs, 1):
             if norm_url(d.url) not in known:
                 known.add(norm_url(d.url))
-                candidates.append(Story(title=d.title or d.url, url=d.url, source=_domain(d.url),
+                candidates.append(Story(title=d.title or d.url, url=d.url, source=publisher_name(d.url),
                                         published=_published(d.published, now), summary=d.snippet, kind="web"))
             rows.append(f"{i}. {d.title} | {d.url} | {d.published or 'date unknown'}\n   {d.snippet}")
         return "\n".join(rows) or "no results"
@@ -426,11 +428,6 @@ class AgentEditor:
                 log.warning("      editor repair failed (%s); keeping the current picks", exc)
                 break
         return picks
-
-
-def _domain(url: str) -> str:
-    host = urlsplit(url).hostname or ""
-    return host.removeprefix("www.") or "web"
 
 
 def _published(day: str, now: datetime) -> datetime:

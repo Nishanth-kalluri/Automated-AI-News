@@ -410,8 +410,7 @@ def test_story_block_without_evidence_has_the_pinned_format():
         "Key fact: \n"
         f"Summary: {summary_a}\n"
         "Article text:\n"
-        "Full article text\n"
-        "with two lines.\n"
+        "Full article text with two lines.\n"  # cleaned like every source text
         "\n"
         "STORY 2: Chip is faster\n"
         "Covered by: The Verge, Feed\n"  # the newsletter is never offered as a credit
@@ -483,9 +482,10 @@ def test_critic_writer_report_lists_intro_outro_story_and_title_fallbacks():
     llm = ScriptedLLM(script, flagged)
     writer = CriticWriter(llm, llm, "Show", "Host", max_repairs=0)
     ep = writer.write(_stories())
-    assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(0, 3)]
-    assert len(writer.report["rounds"][0]["problems"]) == 3
-    assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "outro", "story 2", "title"]
+    # the critic's note on the outro is ignored: the outro is the show's own
+    assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(0, 2)]
+    assert len(writer.report["rounds"][0]["problems"]) == 2
+    assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "story 2", "title"]
     assert writer.report["dropped"] == [] and len(ep.story_segments) == 2  # story 2 airs as its template text
     template = TemplateWriter("Show", "Host")
     assert ep.segments[0].text == template.intro(2).text and ep.segments[-1].text == template.outro().text
@@ -500,7 +500,7 @@ def test_each_part_that_falls_back_is_recorded_once():
     writer = CriticWriter(llm, llm, "Show", "Host", max_repairs=0)
     ep = writer.write(_stories())
     assert [(r["fatal"], r["critic"]) for r in writer.report["rounds"]] == [(2, 1)]
-    assert ep.story_segments[1].text.startswith("Chip is faster. The new chip is 2 times faster")
+    assert ep.story_segments[1].text.startswith("The new chip is 2 times faster")
     assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "story 2"]
 
 

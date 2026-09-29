@@ -267,7 +267,8 @@ def test_editor_is_asked_for_up_to_n_solid_stories_and_no_forum_talk(tmp_path):
     assert "exactly" not in prompt
     assert "up to the requested number" in EDITOR_SYSTEM and "exactly the requested" not in EDITOR_SYSTEM
     assert "Skip Hacker News and Reddit threads" in EDITOR_SYSTEM
-    assert "Never mention newsletters, Hacker News, Reddit, points" in EDITOR_SYSTEM
+    assert "Never mention newsletters or Hacker News" in EDITOR_SYSTEM and "never give points" in EDITOR_SYSTEM
+    assert "News about Reddit the company is fine" in EDITOR_SYSTEM
 
 
 def test_agent_editor_accepts_fewer_picks_than_n_when_at_least_the_minimum(tmp_path):
@@ -450,7 +451,8 @@ def _on_day(monkeypatch, day):
 
 
 def test_writer_rules_ban_source_talk_and_ask_for_a_fresh_hook():
-    for rule in ("Never mention newsletters, Hacker News,\n  Reddit, points, upvotes or comments",
+    for rule in ("Never mention newsletters or Hacker News", "never read out points, upvotes or comment counts",
+                 "never ask viewers to subscribe", "never say the\n  show's sign-off",
                  "fresh, playful hook", "never open like one of the recent intros", "Don't count the stories",
                  '"outro": always ""', "never say the same thing twice", "our newsletter"):
         assert rule in WRITER_SYSTEM, rule
@@ -617,7 +619,7 @@ def test_a_critic_quality_finding_sends_the_segment_for_repair():
     # a quality problem the rewrites don't fix falls back to the story's own summary
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B), flagged)
     ep = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0).write(_stories())
-    assert ep.story_segments[1].text.startswith("Chip is faster. The new chip is 2 times faster")
+    assert ep.story_segments[1].text.startswith("The new chip is 2 times faster")
 
 
 def test_a_story_that_still_reads_source_talk_as_a_template_is_left_out():
@@ -725,7 +727,7 @@ def test_run_stops_when_too_few_stories_have_a_real_description(monkeypatch, tmp
 
     monkeypatch.setattr(pipeline, "build_writer", no_writer)
     cfg = replace(Config.from_env(), allow_no_ai=True)
-    with pytest.raises(RuntimeError, match=r"Only 3 stories with a solid description today \(at least 4 needed\)"):
+    with pytest.raises(RuntimeError, match=r"Only 3 different stories with a solid description today \(at least 4 needed\)"):
         pipeline.run(cfg)
     assert not (tmp_path / "state" / "seen_urls.json").exists()
 
