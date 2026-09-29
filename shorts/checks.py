@@ -253,7 +253,7 @@ def predicted_seconds(episode: Episode) -> float:
 
 def _material(story: Story) -> str:
     return " ".join([story.title, story.headline, story.summary, story.body, story.key_fact, story.source,
-                     *story.outlets])
+                     *story.outlets, *(e.quote for e in story.evidence)])
 
 
 def episode_material(stories: list[Story], frame: str = "") -> str:
