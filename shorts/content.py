@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from difflib import SequenceMatcher
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .models import Story
 
@@ -34,8 +34,8 @@ _SPOKEN_NEWSLETTERS = [re.compile(p) for p in (
 AGGREGATOR_NAMES = ("Hacker News", "Y Combinator News", "Reddit", "subreddit", "Techmeme")
 # Links to discussion threads, not news.
 AGGREGATOR_HOSTS = ("news.ycombinator.com", "reddit.com", "redd.it", "techmeme.com")
-NEWSLETTER_HOSTS = ("therundown.ai", "tldr.tech", "superhuman.ai", "theneurondaily.com", "theneuron.ai",
-                    "beehiiv.com", "bensbites.com", "bensbites.co", "importai.substack.com", "jack-clark.net",
+NEWSLETTER_HOSTS = ("therundown.ai", "tldr.tech", "tldrnewsletter.com", "superhuman.ai", "theneurondaily.com",
+                    "theneuron.ai", "beehiiv.com", "bensbites.com", "bensbites.co", "importai.substack.com", "jack-clark.net",
                     "agentmail.to")
 
 # Sentences in source text that are about the publication, not the news. Dropped whole, so each
@@ -236,6 +236,38 @@ def publisher_name(url: str, feed_title: str = "") -> str:
     return host
 
 
+# Click and campaign ids that say where a reader came from ("?utm_source=tldrai"): dropped from any link
+# viewers see, along with any parameter whose value names a newsletter or forum ("?ref=therundown").
+_TRACKING_PARAMS = ("fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "_bhlid", "mkt_tok", "oly_anon_id",
+                    "oly_enc_id", "vero_id", "__s", "ck_subscriber_id")
+
+
+def clean_url(url: str) -> str:
+    """``url`` without tracking parameters, for the description and anything else viewers see."""
+    try:
+        parts = urlsplit((url or "").strip())
+    except ValueError:
+        return (url or "").strip()
+    if not parts.query:
+        return urlunsplit(parts)
+    keep = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not k.lower().startswith("utm_") and k.lower() not in _TRACKING_PARAMS
+            and not (v and is_banned_name(v.replace("_", " ").replace("-", " ")))]
+    return urlunsplit(parts._replace(query=urlencode(keep)))
+
+
+def credit(source: str, url: str) -> str:
+    """The name to credit on screen: the story's source unless that is a newsletter, forum or a bare web
+    address that isn't the link's own site (a tracking host kept from before research followed the
+    link), in which case the link's publisher."""
+    source = (source or "").strip()
+    host = _host(url)
+    bare = bool(re.fullmatch(r"[\w-]+(?:\.[\w-]+)+", source)) and not (host and _on(host, (source.lower(),)))
+    if source and not bare and not is_banned_name(source):
+        return source
+    return publisher_name(url) if url else ""
+
+
 def banned_names(candidates: list[Story]) -> set[str]:
     """Today's newsletter senders, on top of the known names."""
     return {c.source.strip() for c in candidates if c.kind == "newsletter" and c.source.strip()}
@@ -305,6 +337,24 @@ def says_little(text: str, headline: str) -> bool:
     head = set(_words(headline))
     new = [w for w in _words(text) if w not in head]
     return len(new) < MIN_NEW_WORDS
+
+
+def shared_run(text: str, other: str, n: int = 5, skip: set[str] | frozenset[str] = frozenset(),
+               unless_in: str = "") -> str:
+    """The first ``n`` words in a row that both texts say, with at least two of them outside ``skip``
+    (filler and names, which any two lines about the same story share). A run ``unless_in`` also says is a
+    stock phrase ("rolls out in the coming weeks"), not a repeat of ``other``."""
+    def grams_of(t: str) -> set[tuple[str, ...]]:
+        w = [x.removesuffix("'s") for x in _words(t)]
+        return {tuple(w[i:i + n]) for i in range(len(w) - n + 1)}
+
+    a = [w.removesuffix("'s") for w in _words(text)]
+    grams, stock = grams_of(other), grams_of(unless_in)
+    for i in range(len(a) - n + 1):
+        gram = tuple(a[i:i + n])
+        if gram in grams and gram not in stock and sum(w not in skip for w in gram) >= 2:
+            return " ".join(gram)
+    return ""
 
 
 def copied_run(text: str, sources: list[str], run: int = COPY_RUN_WORDS) -> str:

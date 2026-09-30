@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Protocol
 
 import requests
@@ -53,3 +54,10 @@ def notify(notifier: Notifier, subject: str, text: str) -> None:
     except Exception as exc:  # a failed email must not fail the run
         log.warning("%s notification failed: %s", notifier.name, exc)
         LogNotifier().send(subject, text)
+
+
+def run_url() -> str:
+    """This GitHub Actions run's page, where its download (the video and upload.txt) is; "" elsewhere."""
+    server, repo, run_id = (os.environ.get(k, "").strip()
+                            for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
+    return f"{server}/{repo}/actions/runs/{run_id}" if server and repo and run_id else ""

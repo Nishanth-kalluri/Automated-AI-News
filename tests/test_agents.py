@@ -296,8 +296,11 @@ def _stories():
     return [a, b]
 
 
+INTRO = "Quack, it's Host on Show! A faster chip is coming up. First, the lab's new agent."
+
+
 def _script(a_text, b_text):
-    return {"title": "AI today", "description": "Two stories.", "tags": ["ai"], "intro": "Hello pond, two stories.",
+    return {"title": "AI today", "description": "Two stories.", "tags": ["ai"], "intro": INTRO,
             "segments": [{"headline": "Lab ships agent", "key_fact": "3 steps", "text": a_text},
                          {"headline": "Chip is faster", "key_fact": "2x faster", "text": b_text}],
             "outro": "That's the news from the pond. See you tomorrow!"}
@@ -351,18 +354,21 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     script = _script(GOOD_A, GOOD_B)
     script["intro"] = "A revolutionary day: the lab raised 400 billion dollars, plus 1 more story."
     flagged = {"intro": [], "outro": ["claims the show is on every night"], "segments": []}
-    revision = {"intro": "The lab's agent books travel now, plus 1 more AI story.", "outro": "",
+    revision = {"intro": "Quack, it's Host on Show! A chip that is 2 times faster is ahead. First, the lab's agent.",
+                "outro": "",
                 "segments": [{"story": 1, "headline": "x", "key_fact": "x", "text": "must be ignored"}]}
     llm = ScriptedLLM(script, flagged, revision, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())
     problems = llm.calls[2][1]
     assert "the intro uses hype words" in problems and "400 billion" in problems
     assert "the outro" not in problems  # the outro is the show's own: not the critic's to fix
-    assert ep.segments[0].text == "The lab's agent books travel now, plus 1 more AI story."
+    assert ep.segments[0].text == revision["intro"]
     assert [s.text for s in ep.story_segments] == [GOOD_A, GOOD_B]  # frame problems don't open the stories
     llm = ScriptedLLM(script, NO_ISSUES)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=0).write(_stories())
-    assert ep.segments[0].text == TemplateWriter("Show", "Host").intro(2).text  # still bad: standard intro
+    standard = TemplateWriter("Show", "Host").intro_for(_stories(), ep.story_segments).text
+    assert ep.segments[0].text == standard  # still bad: standard intro
+    assert standard.startswith(("Quack", "Waddle", "Ruffle", "Fresh", "Splash")) and "Chip is faster" in standard
     no_change = {"intro": "", "outro": "", "segments": []}
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B), flagged, no_change, flagged)
     ep = CriticWriter(llm, llm, "Show", "Host", max_repairs=1).write(_stories())

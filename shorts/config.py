@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .outro import SUBSCRIBE_LINES, outro_text
+
 try:
     from dotenv import load_dotenv
 
@@ -21,7 +23,10 @@ DEFAULT_RSS_FEEDS = [
     "https://blog.google/technology/ai/rss/",
     "https://huggingface.co/blog/feed.xml",
 ]
-DEFAULT_OUTRO = "Subscribe so you don't get lost in the storm of AI news. That's the news from the pond. See you tomorrow!"
+# The outro when none is picked: the rotation's first subscribe line and the sign-off. Runs use the daily
+# rotation (outro.OutroLog) unless SHORTS_OUTRO sets one fixed outro.
+DEFAULT_OUTRO = outro_text(SUBSCRIBE_LINES[0])
+YOUTUBE_PRIVACY = ("private", "unlisted", "public")
 DEFAULT_OPENAI_TTS_INSTRUCTIONS = ("You are {host}, a small, cheerful cartoon duck who anchors a daily AI news show. "
                                    "Sound bright, playful and warm, with an upbeat, quick pace and clear diction.")
 DEFAULT_LLM_MODELS = {"openai": "gpt-5", "anthropic": "claude-opus-5"}
@@ -36,6 +41,14 @@ def _env(name: str, default: str = "") -> str:
 
 def _on(name: str, default: str) -> bool:
     return _env(name, default).lower() not in ("off", "0", "false", "no")
+
+
+def _privacy(value: str) -> str:
+    """SHORTS_YOUTUBE_PRIVACY, checked when the run starts rather than rejected by YouTube at the end."""
+    value = value.lower()
+    if value not in YOUTUBE_PRIVACY:
+        raise ValueError(f"SHORTS_YOUTUBE_PRIVACY must be one of {', '.join(YOUTUBE_PRIVACY)}, not {value!r}")
+    return value
 
 
 def _list(name: str, default: list[str]) -> list[str]:
@@ -76,7 +89,7 @@ class Config:
     tavily_api_key: str
     show_name: str
     host_name: str
-    outro: str  # the fixed last line: subscribe ask and sign-off
+    outro: str  # the last line, subscribe ask and sign-off: SHORTS_OUTRO, else today's from the rotation
     voice: str  # edge, openai or silent
     edge_voice: str
     edge_rate: str
@@ -129,7 +142,7 @@ class Config:
             tavily_api_key=_env("TAVILY_API_KEY"),
             show_name=_env("SHORTS_SHOW_NAME", "Duck Desk"),
             host_name=_env("SHORTS_HOST_NAME", "Quackers"),
-            outro=_env("SHORTS_OUTRO", DEFAULT_OUTRO),
+            outro=_env("SHORTS_OUTRO"),  # empty: the daily rotation, picked when a run starts
             voice=_env("SHORTS_VOICE", "edge"),
             edge_voice=_env("SHORTS_EDGE_VOICE", "en-US-AnaNeural"),
             edge_rate=_env("SHORTS_EDGE_RATE", "+18%"),
@@ -139,8 +152,8 @@ class Config:
             voice_lineup=_list("SHORTS_VOICE_LINEUP", []),
             animator=_env("SHORTS_ANIMATOR", "puppet"),
             x264_preset=_env("SHORTS_X264_PRESET", "medium"),
-            uploader=_env("SHORTS_UPLOADER", "local"),
-            youtube_privacy=_env("SHORTS_YOUTUBE_PRIVACY", "private"),
+            uploader=_env("SHORTS_UPLOADER", "local").lower(),
+            youtube_privacy=_privacy(_env("SHORTS_YOUTUBE_PRIVACY", "private")),
             notify_email=_env("SHORTS_NOTIFY_EMAIL"),
             output_dir=Path(_env("SHORTS_OUTPUT_DIR", "output")),
             state_dir=Path(_env("SHORTS_STATE_DIR", "state")),

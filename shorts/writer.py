@@ -13,30 +13,37 @@ from dataclasses import replace
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 from urllib.parse import urlsplit
 
-from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, _event_words, episode_material,
-                     fatal, lint_episode, opening, predicted_seconds, unsupported_numbers)
+from .checks import (STORY_WORDS, TARGET_MAX_SECONDS, WORDS_PER_SECOND, Issue, _event_words, _speech_problems,
+                     episode_material, fatal, intro_shape_problems, lint_episode, opening, predicted_seconds,
+                     unsupported_numbers)
 from .config import DEFAULT_OUTRO
-from .content import (clean_text, is_aggregator_url, is_banned_name, on_newsletter_host, repetition,
-                      script_problems)
+from .content import (clean_text, clean_url, credit, is_aggregator_url, is_banned_name, on_newsletter_host,
+                      repetition, script_problems)
 from .llm import LLM, BudgetExceeded, strict_object
 from .models import Episode, Segment, Story
 
 log = logging.getLogger(__name__)
 PERSONA_FILE = Path(__file__).with_name("persona.md")
-SIGN_OFF = "That's the news from the pond. See you tomorrow!"
-# Openings for the template intro, one per day, so even the fallback doesn't sound the same every day.
+# Greetings for the template intro, one per day, so even the fallback doesn't sound the same every day.
 TEMPLATE_HOOKS = (
     "Quack quack, it's {host} on {show}!",
     "Waddle in, friends, it's {host} on {show}!",
-    "Quack! {host} here, and the AI pond is busy today.",
+    "Quack! {host} here on {show}.",
     "Ruffle those feathers, it's {host} on {show}!",
-    "Fresh from the pond, it's {host} on {show}!",
-    "Splash! {host} here with today's {show}.",
+    "Fresh from the pond, it's {host}!",
+    "Splash! {host} here with {show}.",
     "Quack attack! It's {host} on {show}.",
 )
+# The template intro's tease of the next stories and its hand-over to story 1: two headlines, one, the hand-over.
+TEMPLATE_BRIDGES = (
+    ("Coming up: {a}, and {b}.", "Coming up: {a}.", "First, the top story."),
+    ("Also ahead: {a}, and {b}.", "Also ahead: {a}.", "But we start with the big one."),
+    ("Still to come: {a}, and {b}.", "Still to come: {a}.", "First up, the top story."),
+)
+TEMPLATE_INTRO_MAX = 22
 # Problems about the intro or outro only; they don't open the story segments for rewriting.
 FRAME_CODES = ("missing_intro", "missing_outro", "intro_problem", "outro_problem")
 # Problems only settle() fixes, by using the standard title or description.
@@ -47,9 +54,19 @@ WRITER_SYSTEM = """You write the script for a daily vertical YouTube Short of ab
 {persona}
 
 Format:
-- "intro": 12 to 20 words. Open with a fresh, playful hook in the host's voice that grabs attention in the first
-  second: a quack, a duck pun, a surprising fact from the biggest story, or a question. Then tease the biggest
-  story. Every day's hook is new: never open like one of the recent intros you are shown. Don't count the stories.
+- "intro": 14 to 22 words that read as one thought: greet, tease, hand over.
+  Open with a fresh, playful hook of at most 8 words that greets the viewer as the host, with a quack or a
+  duck word and your name or the show's, like "Quack quack, it's {host} on {show}!". It may carry the
+  episode's one duck joke. Keep it short, so the news starts within about three seconds.
+  Then, in about 14 words, give the most gripping point from stories 2 to 4, or what ties most stories
+  together, and hand over to story 1 in five words or fewer, for example "<tease> is coming up. First,
+  <story 1>." or "<what ties the day together>, from <tease> to <tease>, starting with <story 1>."
+  Story 1's segment starts right after the intro, so only name story 1: never say its facts, numbers or wording.
+  Tension is good; exaggeration is not: keep "in tests", "plans to", "says" and the right company, and tell
+  a test, plan or claim as exactly that. With a single story, go straight from the greeting to it.
+  No questions, no hype, no warnings about missing out and no calls to action: the outro does that.
+  Word the greeting and the hand-over differently every day: never open like one of the recent intros you are
+  shown. Don't count the stories.
 - "segments": exactly one per story, in the given order. Each is {lo} to {hi} words (about 15 seconds spoken):
   what happened, with the key specifics (who, what, how much, when), then one short line on why it matters.
   Describe the news; never just read the headline out, and never say the same thing twice.
@@ -92,6 +109,9 @@ REVISION_SCHEMA = strict_object({
 REVIEW_SCHEMA = strict_object({
     "intro": {"type": "array", "items": {"type": "string"},
               "description": "claims in the intro that the material does not support"},
+    "intro_quality": {"type": "array", "items": {"type": "string"},
+                      "description": "ways the intro fails as an opening: restates story 1, parts don't connect, "
+                                     "generic or undelivered tease, no hand-off, pushes viewers; empty if none"},
     "outro": {"type": "array", "items": {"type": "string"},
               "description": "always empty: the outro is the show's fixed sign-off"},
     "segments": {"type": "array", "items": strict_object({
@@ -107,6 +127,19 @@ CRITIC_SYSTEM = """You fact-check the script of a daily AI news Short against th
 For every story segment, list each claim (a name, number, date, quote or event) in the segment text or its key
 fact that the material does not support. Check the intro the same way against all the stories. The outro is
 the show's fixed sign-off: leave its list empty.
+
+The intro greets the viewer as the host, teases the day's news and hands over to story 1. Under "intro", also
+list any tease that is stronger than its story: one that drops a qualifier the material has ("in simulated
+tests", "plans to", "says", "according to"), tells a test, plan or claim as something that happened, or credits
+the wrong company. Under "intro_quality" list only these problems:
+- it says story 1's facts, numbers or wording, which story 1's segment says right after it (just naming story 1
+  is fine);
+- its parts don't make one thought: a greeting followed by an unrelated fact, a list of fragments, or a question
+  the script never answers;
+- its tease is generic and could air on any day, or promises something no segment delivers;
+- it doesn't lead into story 1;
+- it warns viewers about missing out or asks them to do anything (the outro does that).
+Wording you would only have written differently is not a problem. Leave the list empty when none of these apply.
 Paraphrase and rounding are fine; new facts, wrong numbers and claims about the wrong company are not.
 
 Then list each segment's quality problems as TV news, under "quality":
@@ -188,7 +221,7 @@ def description_footer(stories: list[Story]) -> str:
     for s in stories:
         name = s.headline or s.title
         name = "" if script_problems(name) else name
-        url = "" if is_aggregator_url(s.url) or on_newsletter_host(s.url) else s.url
+        url = "" if is_aggregator_url(s.url) or on_newsletter_host(s.url) else clean_url(s.url)
         if name or url:
             lines.append(f"- {name}: {url}" if name and url else f"- {name or url}")
     return "\n\nSources:\n" + "\n".join(lines) + "\n\nMade with AI. #AI #AINews #Shorts"
@@ -200,7 +233,8 @@ def default_description(stories: list[Story]) -> str:
 
 def _story_segment(story: Story, text: str, headline: str = "", key_fact: str = "") -> Segment:
     return Segment(kind="story", text=text.strip(), headline=(headline or story.headline or story.title).strip(),
-                   key_fact=(key_fact or story.key_fact).strip(), source=story.source, url=story.url)
+                   key_fact=(key_fact or story.key_fact).strip(), source=credit(story.source, story.url),
+                   url=clean_url(story.url))
 
 
 def _first_words(text: str, limit: int) -> str:
@@ -271,13 +305,13 @@ class LLMWriter:
         self.outro, self.banned, self.recent_intros = outro, set(banned), list(recent_intros)
 
     def system(self, n: int) -> str:
-        return WRITER_SYSTEM.format(persona=load_persona(self.show, self.host), n=n,
+        return WRITER_SYSTEM.format(persona=load_persona(self.show, self.host), n=n, host=self.host, show=self.show,
                                     lo=STORY_WORDS[0], hi=STORY_WORDS[1])
 
     def draft(self, stories: list[Story]) -> dict:
         recent = "".join(f"- {t}\n" for t in self.recent_intros)
         user = (f"Today is {date.today():%A, %B %d, %Y}.\n\n"
-                + (f"Recent intros (open differently from all of these):\n{recent}\n" if recent else "")
+                + (f"Recent intros (greet and tease differently from all of these):\n{recent}\n" if recent else "")
                 + _story_block(stories, self.banned))
         return self.llm.json(self.system(len(stories)), user, stage="writer", schema=SCRIPT_SCHEMA)
 
@@ -301,20 +335,53 @@ class TemplateWriter:
         self.show, self.host, self.outro_text = show, host, outro
         self.recent_intros = list(recent_intros)
 
-    def intro(self, n: int) -> Segment:
-        """Today's hook from the rotation, skipping any a recent episode opened with."""
+    def intro(self, n: int = 0, headlines: Sequence[str] = (), *, first_text: str = "", first_names: str = "",
+              material: str = "", banned: set[str] | tuple[str, ...] = ()) -> Segment:
+        """Today's greeting from the rotation (skipping any a recent episode opened with), a tease of the next
+        stories' headlines and a hand-over to the first story, which it never describes.
+
+        ``headlines`` are the stories' on-screen headlines in airing order; ``first_text`` is story 1's
+        segment and ``first_names`` its headline and title, for the same checks the writer's intro gets.
+        """
         recent = {opening(t) for t in self.recent_intros}
         start = date.today().toordinal()
         hooks = [TEMPLATE_HOOKS[(start + k) % len(TEMPLATE_HOOKS)].format(host=self.host, show=self.show)
                  for k in range(len(TEMPLATE_HOOKS))]
-        hook = next((h for h in hooks if opening(h) not in recent), hooks[0])
-        return Segment(kind="intro", text=f"{hook} Here are the AI stories you need today.")
+        greet = next((h for h in hooks if opening(h) not in recent), hooks[0])
+        usable = []
+        for h in list(headlines)[1:]:
+            h = " ".join((h or "").split()).rstrip(".!:;, ")
+            if (not h or h.endswith("?") or len(h.split()) > 9 or _speech_problems(h, banned)
+                    or (material and unsupported_numbers(h, material))):
+                continue
+            usable.append(h)
+        two, one, hand = TEMPLATE_BRIDGES[start % len(TEMPLATE_BRIDGES)]
+        options = []
+        if len(usable) >= 2:
+            options.append(f"{greet} {two.format(a=usable[0], b=usable[1])} {hand}")
+        if usable:
+            options.append(f"{greet} {one.format(a=usable[0])} {hand}")
+        for text in options:
+            if (len(text.split()) <= TEMPLATE_INTRO_MAX
+                    and not intro_shape_problems(text, self.host, self.show, first_text, first_names)):
+                return Segment(kind="intro", text=text)
+        return Segment(kind="intro", text=f"{greet} Let's get right to the top story.")
+
+    def intro_for(self, stories: list[Story], segments: Sequence[Segment], frame: str = "",
+                  banned: set[str] | tuple[str, ...] = ()) -> Segment:
+        """``intro`` for these stories as their ``segments`` (story segments only) will air."""
+        first = segments[0] if segments else None
+        names = f"{stories[0].headline} {stories[0].title} {first.headline if first else ''}" if stories else ""
+        return self.intro(len(stories), [seg.headline for seg in segments],
+                          first_text=first.text if first else "", first_names=names,
+                          material=episode_material(stories, frame), banned=banned)
 
     def outro(self) -> Segment:
         return Segment(kind="outro", text=self.outro_text)
 
     def write(self, stories: list[Story]) -> Episode:
-        segments = [self.intro(len(stories)), *(template_segment(s) for s in stories), self.outro()]
+        body = [template_segment(s) for s in stories]
+        segments = [self.intro_for(stories, body), *body, self.outro()]
         title = f"AI News Today: {stories[0].headline or stories[0].title}"[:95]
         return Episode(
             title="AI News Today" if script_problems(title) else title,
@@ -351,7 +418,8 @@ class CriticWriter:
 
     def lint(self, episode: Episode, stories: list[Story]) -> list[Issue]:
         return lint_episode(episode, stories, self.frame(), banned=self.base.banned,
-                            recent_intros=self.base.recent_intros, description=_own_description(episode))
+                            recent_intros=self.base.recent_intros, description=_own_description(episode),
+                            host=self.base.host, show=self.base.show)
 
     def write(self, stories: list[Story]) -> Episode:
         self.report = {"rounds": [], "fallbacks": [], "dropped": [], "critic_errors": 0}
@@ -403,6 +471,9 @@ class CriticWriter:
         if claims:
             issues.append(Issue("intro_problem", "the intro makes claims the material does not support: "
                                                  + "; ".join(claims)))
+        weak = [q for q in data.get("intro_quality", []) if q]
+        if weak:
+            issues.append(Issue("intro_problem", "the intro doesn't work as an opening: " + "; ".join(weak)))
         for item in data.get("segments", []):
             idx, claims = item.get("story", 0) - 1, [c for c in item.get("unsupported", []) if c]
             if 0 <= idx < len(stories) and claims:
@@ -415,6 +486,9 @@ class CriticWriter:
     def revise(self, episode: Episode, stories: list[Story], problems: list[Issue], *, stage: str) -> Episode:
         user = REVISE_PROMPT.format(problems="\n".join(p.line() for p in problems), script=_script_rows(episode),
                                     material=_story_block(stories, self.base.banned))
+        recent = "".join(f"- {t}\n" for t in self.base.recent_intros)
+        if recent and any(p.code in ("intro_problem", "missing_intro") for p in problems):
+            user += f"\n\nRecent intros (greet and tease differently from all of these):\n{recent}"
         data = self.llm.json(self.base.system(len(stories)), user, stage=stage, schema=REVISION_SCHEMA)
         whole_script = any(p.index is None and p.code not in FRAME_CODES for p in problems)
         allowed = set(range(len(stories))) if whole_script else {p.index for p in problems}
@@ -433,6 +507,7 @@ class CriticWriter:
         """Last resort for problems the rewrites didn't fix: template text or a trim, segment by segment."""
         segments = list(episode.segments)
         replaced: set[int] = set()  # positions already swapped for template text
+        intro_why, first_fallback = "", len(self.report["fallbacks"])
         for issue in remaining:
             pos = _segment_position(issue)
             if pos is not None and pos in replaced:
@@ -440,9 +515,7 @@ class CriticWriter:
             if issue.code != "too_long" and pos is not None:
                 replaced.add(pos)
             if issue.code in ("missing_intro", "intro_problem"):
-                log.warning("      the intro still has a problem (%s); using the standard intro", issue.detail)
-                segments[0] = self.template.intro(len(stories))
-                self.report["fallbacks"].append({"part": "intro", "why": issue.detail})
+                intro_why = issue.detail  # replaced below, once the story segments are final
             elif issue.code in ("missing_outro", "outro_problem"):
                 log.warning("      the outro still has a problem (%s); using the standard outro", issue.detail)
                 segments[-1] = self.template.outro()
@@ -457,6 +530,10 @@ class CriticWriter:
                             issue.index + 1, issue.detail)
                 segments[issue.index + 1] = template_segment(stories[issue.index])
                 self.report["fallbacks"].append({"part": f"story {issue.index + 1}", "why": issue.detail})
+        if intro_why:
+            log.warning("      the intro still has a problem (%s); using the standard intro", intro_why)
+            segments[0] = self.template.intro_for(stories, segments[1:-1], self.frame(), self.base.banned)
+            self.report["fallbacks"].insert(first_fallback, {"part": "intro", "why": intro_why})
         episode = replace(episode, segments=segments)
         episode = self.drop_unfit(episode, stories)
         stories = episode.stories
@@ -504,9 +581,12 @@ class CriticWriter:
             return any(words & said for words in gone)
 
         title, description = episode.title, _own_description(episode)
-        if teases(episode.segments[0].text):
-            segments[0] = self.template.intro(len(kept_stories))  # the intro teased a story that's gone
-            self.report["fallbacks"].append({"part": "intro", "why": "teased a story that was left out"})
+        # The intro hands over to story 1: without it, it would tease the new first story as "coming up".
+        why = ("teased a story that was left out" if teases(episode.segments[0].text) else
+               "led into the first story, which was left out" if 0 in bad else "")
+        if why and kept_stories:
+            segments[0] = self.template.intro_for(kept_stories, segments[1:-1], self.frame(), self.base.banned)
+            self.report["fallbacks"].append({"part": "intro", "why": why})
         if kept_stories and teases(title):
             title = self.template.write(kept_stories).title
             self.report["fallbacks"].append({"part": "title", "why": "named a story that was left out"})

@@ -123,9 +123,9 @@ def test_config_defaults_are_the_faster_edge_voice_and_the_fixed_outro(monkeypat
     assert cfg.allow_no_ai is False
     assert cfg.voice_lineup == []
     assert cfg.sources == ["newsletter", "rss"]
-    assert cfg.outro == DEFAULT_OUTRO
-    assert cfg.outro.endswith(SIGN_OFF)
-    assert "Subscribe" in cfg.outro
+    assert cfg.outro == ""  # the daily rotation
+    assert DEFAULT_OUTRO.endswith(SIGN_OFF)
+    assert "subscribe" in DEFAULT_OUTRO.lower()
 
 
 def test_config_voice_settings_follow_the_environment(monkeypatch):

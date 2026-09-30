@@ -488,7 +488,8 @@ def test_critic_writer_report_lists_intro_outro_story_and_title_fallbacks():
     assert [f["part"] for f in writer.report["fallbacks"]] == ["intro", "story 2", "title"]
     assert writer.report["dropped"] == [] and len(ep.story_segments) == 2  # story 2 airs as its template text
     template = TemplateWriter("Show", "Host")
-    assert ep.segments[0].text == template.intro(2).text and ep.segments[-1].text == template.outro().text
+    assert ep.segments[0].text == template.intro_for(_stories(), ep.story_segments).text
+    assert ep.segments[-1].text == template.outro().text
     assert ep.title == template.write(_stories()).title
 
 

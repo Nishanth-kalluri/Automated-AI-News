@@ -35,7 +35,8 @@ jobs:
 
       # The `state` branch holds the stories that already aired (seen_urls.json), the month's LLM
       # spend (spend.json), Tavily credits (tavily.json), the shadow week's rows (shadow.jsonl), the
-      # last intros (intros.json, so hooks don't repeat) and the last script (last_episode.json).
+      # last intros (intros.json, so hooks don't repeat), the last outros (outros.json, the subscribe line
+      # rotation) and the last script (last_episode.json).
       - name: Load state
         id: load
         run: |
@@ -82,6 +83,8 @@ jobs:
           SHORTS_OPENAI_TTS_MODEL: ${{ vars.SHORTS_OPENAI_TTS_MODEL }}
           SHORTS_VOICE_LINEUP: ${{ inputs.voices }}
           SHORTS_UPLOADER: ${{ vars.SHORTS_UPLOADER || 'local' }}
+          SHORTS_YOUTUBE_PRIVACY: ${{ vars.SHORTS_YOUTUBE_PRIVACY }}
+          SHORTS_OUTRO: ${{ vars.SHORTS_OUTRO }}
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
@@ -109,6 +112,7 @@ jobs:
             output/*/short.mp4
             output/*/*.json
             output/*/captions.ass
+            output/*/upload.txt
             output/*/shadow/short.mp4
             output/*/shadow/*.json
             output/*/shadow/captions.ass
