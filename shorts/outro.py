@@ -20,7 +20,7 @@ SUBSCRIBE_LINES = (
     "At the next family dinner, your nephew will explain AI to you. Subscribe before that happens.",
     "Forecast: heavy AI news, high chance of flooding. Subscribe to stay dry.",
     "Consider this your first and final warning. Subscribe, or receive one very strongly worded honk.",
-    "AI news rolls off me like water off a duck's back. You? Not so much. Subscribe.",
+    "AI news rolls off me like water off a duck's back, but you're no duck. Subscribe.",
     "Unless you enjoy being a week behind your own group chat, subscribe.",
     "Scroll away without subscribing, and that whole AI flood is yours to mop up alone.",
     "Don't make me waddle over there. Subscribe, and these little legs can stay right here.",

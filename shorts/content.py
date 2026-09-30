@@ -238,7 +238,7 @@ def publisher_name(url: str, feed_title: str = "") -> str:
 
 # Click and campaign ids that say where a reader came from ("?utm_source=tldrai"): dropped from any link
 # viewers see, along with any parameter whose value names a newsletter or forum ("?ref=therundown").
-_TRACKING_PARAMS = ("fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "mkt_tok", "oly_anon_id",
+_TRACKING_PARAMS = ("fbclid", "gclid", "mc_cid", "mc_eid", "_hsenc", "_hsmi", "_bhlid", "mkt_tok", "oly_anon_id",
                     "oly_enc_id", "vero_id", "__s", "ck_subscriber_id")
 
 
@@ -339,15 +339,20 @@ def says_little(text: str, headline: str) -> bool:
     return len(new) < MIN_NEW_WORDS
 
 
-def shared_run(text: str, other: str, n: int = 5, skip: set[str] | frozenset[str] = frozenset()) -> str:
+def shared_run(text: str, other: str, n: int = 5, skip: set[str] | frozenset[str] = frozenset(),
+               unless_in: str = "") -> str:
     """The first ``n`` words in a row that both texts say, with at least two of them outside ``skip``
-    (filler and names, which any two lines about the same story share)."""
+    (filler and names, which any two lines about the same story share). A run ``unless_in`` also says is a
+    stock phrase ("rolls out in the coming weeks"), not a repeat of ``other``."""
+    def grams_of(t: str) -> set[tuple[str, ...]]:
+        w = [x.removesuffix("'s") for x in _words(t)]
+        return {tuple(w[i:i + n]) for i in range(len(w) - n + 1)}
+
     a = [w.removesuffix("'s") for w in _words(text)]
-    b = [w.removesuffix("'s") for w in _words(other)]
-    grams = {tuple(b[i:i + n]) for i in range(len(b) - n + 1)}
+    grams, stock = grams_of(other), grams_of(unless_in)
     for i in range(len(a) - n + 1):
         gram = tuple(a[i:i + n])
-        if gram in grams and sum(w not in skip for w in gram) >= 2:
+        if gram in grams and gram not in stock and sum(w not in skip for w in gram) >= 2:
             return " ".join(gram)
     return ""
 

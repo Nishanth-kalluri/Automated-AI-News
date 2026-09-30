@@ -2,7 +2,7 @@
 
     01-candidates.json  01-candidates.full.json  02-picks.json  02-research.json  02-coverage.json
     03-episode.json  03-review.json  audio/  host/  cards/  timeline.json  captions.ass  short.mp4
-    qa.json  upload.json  cost.json  shadow/
+    qa.json  upload.json  upload.txt  cost.json  shadow/
 
 With an LLM configured and SHORTS_AGENTS on (the default), the editor and writer run as agents
 with check-and-repair loops; without one, every stage uses its no-key fallback. SHORTS_WEB=on
@@ -33,7 +33,7 @@ from .qa import QAReport, check
 from .research import AgentResearcher, build_researcher, research, swap_failing
 from .selection import HeuristicEditor, SeenStore, build_editor, drop_duplicates, pick_with_fallback, settle
 from .sources import build_sources, fetch_all
-from .upload import LocalUploader, Uploader, build_uploader, upload_hint
+from .upload import LocalUploader, Uploader, YouTubeSignInError, build_uploader, upload_hint
 from .visuals import StoryCards
 from .voice import build_voice, lineup, narrate, parse_lineup
 from .web import TavilyCredits, build_web
@@ -315,20 +315,26 @@ def _uploader(cfg: Config, live_upload: bool) -> tuple[Uploader, str]:
         return LocalUploader(), ""
     try:
         uploader = build_uploader(cfg)
-        check = getattr(uploader, "check", None)
-        if check:
-            check()
-        return uploader, ""
-    except Exception as exc:
+    except Exception as exc:  # missing secrets, an unknown SHORTS_UPLOADER, the client not installed
         log.warning("the %s uploader isn't usable (%s); the episode is made for a hand upload", cfg.uploader, exc)
         return LocalUploader(), upload_hint(exc)
+    check = getattr(uploader, "check", None)
+    try:
+        if check:
+            check()
+    except (YouTubeSignInError, ImportError) as exc:
+        log.warning("the %s sign-in failed (%s); the episode is made for a hand upload", cfg.uploader, exc)
+        return LocalUploader(), upload_hint(exc)
+    except Exception as exc:  # anything else proves nothing yet: the upload itself tries again
+        log.warning("the %s sign-in check failed (%s); trying the upload anyway", cfg.uploader, exc)
+    return uploader, ""
 
 
 def _where(cfg: Config, result, upload: bool, problem: str) -> str:
     """The email's first lines: where the video went, and what to do with it."""
     url = run_url()
-    download = (f"The video (short.mp4) and upload.json (title, description, tags) are in the run's download: {url}"
-                if url else f"The video and upload.json are in {Path(result.location).parent}.")
+    download = (f"The video (short.mp4) and upload.txt (title, description and tags to paste) are in the run's "
+                f"download: {url}" if url else f"The video and upload.txt are in {Path(result.location).parent}.")
     if problem:
         return f"NOT uploaded to YouTube: {problem}\n\n{download}"
     if result.uploader == "youtube":
@@ -336,7 +342,7 @@ def _where(cfg: Config, result, upload: bool, problem: str) -> str:
         if cfg.youtube_privacy == "private":
             text += ("\n\nUntil the Google Cloud project passes YouTube's API audit, YouTube keeps uploads from it "
                      "private, and Studio can't make them public. To air this one before then, upload short.mp4 by "
-                     f"hand with the title and description in upload.json. {download}\nOnce the audit passes, set "
+                     f"hand with the title and description in upload.txt. {download}\nOnce the audit passes, set "
                      "the variable SHORTS_YOUTUBE_PRIVACY to public.")
         return text
     why = "this run was started without upload" if cfg.uploader != "local" else "SHORTS_UPLOADER is local"

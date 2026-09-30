@@ -415,13 +415,36 @@ def test_upload_sends_clean_metadata_and_resumes_after_a_dropped_connection(monk
     assert body["snippet"]["title"].endswith("#Shorts") and "utm" not in body["snippet"]["description"]
     assert body["status"] == {"privacyStatus": "private", "selfDeclaredMadeForKids": False,
                               "containsSyntheticMedia": True}
-    assert request.retries == [5, 5, 5]  # the client retries 5xx itself; a dropped connection resumes
+    assert request.retries == [0, 0, 0]  # never the client's own retries: they resend an empty chunk
     assert json.loads((tmp_path / "upload.json").read_text())["file"] == "short.mp4"  # for a hand upload too
+    pasted = (tmp_path / "upload.txt").read_text(encoding="utf-8")
+    assert pasted.startswith("TITLE\nOpenAI's always-on agents #Shorts\n\nDESCRIPTION\nD https://a.com/x\n")
+    assert pasted.endswith("TAGS\nAI news, OpenAI\n")
+
+
+def _http_error(status):
+    from googleapiclient.errors import HttpError
+
+    return HttpError(types.SimpleNamespace(status=status, reason="x"), b"{}")
+
+
+def test_upload_resumes_after_youtube_is_busy_but_not_after_a_rejection(monkeypatch, tmp_path):
+    _secrets(monkeypatch)
+    video = tmp_path / "short.mp4"
+    video.write_bytes(b"x")
+    request = _Request([_http_error(503), _http_error(429), {"id": "ok"}])
+    _fake_google(monkeypatch, request)
+    assert YouTubeUploader("private").upload(video, _episode()).location.endswith("/ok")
+    request = _Request([_http_error(400), {"id": "never"}])
+    _fake_google(monkeypatch, request)
+    with pytest.raises(Exception) as caught:
+        YouTubeUploader("private").upload(video, _episode())
+    assert caught.value.resp.status == 400 and len(request.retries) == 1
 
 
 def test_upload_gives_up_after_repeated_drops(monkeypatch, tmp_path):
     _secrets(monkeypatch)
-    _fake_google(monkeypatch, _Request([OSError("down")] * 4))
+    _fake_google(monkeypatch, _Request([OSError("down")] * (upload.UPLOAD_RETRIES + 1)))
     video = tmp_path / "short.mp4"
     video.write_bytes(b"x")
     with pytest.raises(OSError):
@@ -514,3 +537,94 @@ def test_client_ids_come_from_the_downloaded_json(tmp_path):
     path = tmp_path / "client_secret.json"
     path.write_text(json.dumps({"installed": {"client_id": "abc.apps.googleusercontent.com", "client_secret": "s"}}))
     assert upload._client_ids(str(path)) == ("abc.apps.googleusercontent.com", "s")
+
+
+# --- review fixes: greetings with possessives, stock phrases, story 1 dropped, rewrites, retries ---
+
+def test_greetings_with_a_possessive_or_contraction_count():
+    for intro in ("Quack, Duck Desk's on the air! A cheaper GPT is coming up. First, OpenAI's Dots.",
+                  "Duck Desk’s back with the pond news! A cheaper GPT is ahead, but first, OpenAI's Dots.",
+                  "Quackers'll walk you through it! A cheaper GPT is ahead, but first, OpenAI's Dots."):
+        assert _shape(intro) == [], intro
+    assert any("greet" in p for p in _shape("Quack! Desk news today, a cheaper GPT is ahead. First, OpenAI's Dots."))
+
+
+def test_a_stock_phrase_another_story_shares_is_not_a_repeat_of_story_1():
+    first = "Google made Gemini 3 Flash the default in its app, and it rolls out in the coming weeks to everyone."
+    other = "Microsoft says Copilot's memory rolls out in the coming weeks for Plus and Pro users."
+    intro = "Quack! Quackers here on Duck Desk. Copilot's memory rolls out in the coming weeks. First, Gemini."
+    assert any("repeats the first story" in p for p in intro_shape_problems(intro, HOST, SHOW, first, "Gemini"))
+    assert intro_shape_problems(intro, HOST, SHOW, first, "Gemini", other) == []
+
+
+def test_saying_story_1s_opening_sentence_is_caught_even_in_headline_words():
+    first = "Google made Gemini 3 Flash the default model in the Gemini app. Users get faster answers from today."
+    intro = "Quack quack, it's Quackers on Duck Desk! Google made Gemini 3 Flash the default model in the Gemini app."
+    problems = intro_shape_problems(intro, HOST, SHOW, first, "Google makes Gemini 3 Flash the default model")
+    assert any("repeats the first story" in p and "Gemini 3 Flash" in p for p in problems)
+
+
+def test_when_story_1_is_left_out_the_intro_is_rebuilt_for_the_new_first_story():
+    from tests.test_review_fixes import GOOD_A, GOOD_B, NO_ISSUES, _lazy_story, _script, _stories
+
+    stories = [_lazy_story(), *_stories()]
+    forum = ("Over on Reddit, users say GPT-6 now gives shorter answers than GPT-5 did. OpenAI says it is looking "
+             "into the reports and will share an update soon. People notice quickly when a model changes.")
+    intro = "Quack, it's Quackers on Duck Desk! A faster chip is coming up. But first, the big one."
+    llm = ScriptedLLM(_script(forum, GOOD_A, GOOD_B, intro=intro), NO_ISSUES)
+    w = CriticWriter(llm, llm, SHOW, HOST, max_repairs=0)
+    ep = w.write(stories)
+    assert [d["story"] for d in w.report["dropped"]] == [1]
+    assert ep.segments[0].text != intro
+    assert ep.segments[0].text == w.template.intro_for(ep.stories, ep.story_segments).text
+    assert {"part": "intro", "why": "led into the first story, which was left out"} in w.report["fallbacks"]
+
+
+def test_an_intro_rewrite_is_shown_the_recent_intros():
+    from tests.test_review_fixes import GOOD_A, GOOD_B, NO_CHANGE, NO_ISSUES, _script, _stories
+
+    recent = ["Quack quack, it's Quackers on Duck Desk! Big news from OpenAI today."]
+    script = _script(GOOD_A, GOOD_B, intro="Quack! A faster chip is coming up. First, a lab agent for trips.")
+    llm = ScriptedLLM(script, NO_ISSUES, NO_CHANGE, NO_ISSUES)
+    CriticWriter(llm, llm, SHOW, HOST, max_repairs=1, recent_intros=recent).write(_stories())
+    assert "Recent intros (greet and tease differently from all of these):\n- " + recent[0] in llm.calls[2][1]
+    llm = ScriptedLLM(_script(GOOD_A.replace("The lab", "The revolutionary lab"), GOOD_B), NO_ISSUES, NO_CHANGE,
+                      NO_ISSUES)
+    CriticWriter(llm, llm, SHOW, HOST, max_repairs=1, recent_intros=recent).write(_stories())
+    assert "Recent intros" not in llm.calls[2][1]  # only when the intro is being rewritten
+
+
+def test_no_outro_sentence_is_a_phrase_a_story_could_say():
+    from shorts.content import _sentences
+
+    for line in SUBSCRIBE_LINES:
+        for sentence in _sentences(line):
+            assert "subscrib" in sentence.lower() or len(sentence.split()) >= 5 or len(sentence.split()) < 3, sentence
+
+
+def test_a_network_blip_at_sign_in_does_not_cancel_the_upload(monkeypatch):
+    from google.auth.exceptions import RefreshError, TransportError
+    from google.oauth2.credentials import Credentials
+
+    _secrets(monkeypatch)
+    for exc in (TransportError("connection reset"), RefreshError("503 from Google", retryable=True)):
+        def fail(self, request, exc=exc):
+            raise exc
+
+        monkeypatch.setattr(Credentials, "refresh", fail)
+        YouTubeUploader("private").check()  # logs and leaves it to the upload
+
+    class Flaky:
+        name = "youtube"
+
+        def check(self):
+            raise RuntimeError("something odd")
+
+    monkeypatch.setattr(pipeline, "build_uploader", lambda cfg: Flaky())
+    cfg = replace(Config.from_env(), uploader="youtube")
+    uploader, problem = pipeline._uploader(cfg, True)
+    assert isinstance(uploader, Flaky) and problem == ""
+    monkeypatch.setattr(pipeline, "build_uploader", lambda cfg: _Refused())
+    uploader, problem = pipeline._uploader(cfg, True)
+    assert isinstance(uploader, LocalUploader) and "youtube-auth" in problem
+    assert pipeline._uploader(cfg, False)[1] == "" and pipeline._uploader(replace(cfg, uploader="local"), True)[1] == ""

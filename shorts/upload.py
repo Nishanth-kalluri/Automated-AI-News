@@ -21,6 +21,8 @@ YT_SECRETS = ("YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET", "YOUTUBE_REFRESH_TOK
 DESCRIPTION_MAX_BYTES = 4900
 TAGS_MAX_CHARS = 450
 _URL = re.compile(r"https?://\S+")
+RETRY_STATUSES = (429, 500, 502, 503, 504)  # YouTube busy or down for a moment: resume the upload
+UPLOAD_RETRIES = 5
 
 
 def youtube_title(episode: Episode) -> str:
@@ -89,10 +91,15 @@ class LocalUploader:
 
 
 def write_metadata(video: Path, episode: Episode) -> Path:
-    """upload.json next to the video: what a hand upload needs (the YouTube uploader writes it too)."""
-    meta = video.with_name("upload.json")
-    meta.write_text(json.dumps({"file": video.name, **upload_metadata(episode)}, indent=2))
-    return meta
+    """upload.json next to the video, and upload.txt with the same title, description and tags ready to
+    paste into YouTube Studio for a hand upload. The YouTube uploader writes them too."""
+    meta = upload_metadata(episode)
+    path = video.with_name("upload.json")
+    path.write_text(json.dumps({"file": video.name, **meta}, indent=2, ensure_ascii=False), encoding="utf-8")
+    video.with_name("upload.txt").write_text(
+        f"TITLE\n{meta['title']}\n\nDESCRIPTION\n{meta['description']}\n\nTAGS\n{', '.join(meta['tags'])}\n",
+        encoding="utf-8")
+    return path
 
 
 class YouTubeSignInError(RuntimeError):
@@ -124,17 +131,24 @@ class YouTubeUploader:
 
     def check(self) -> None:
         """Sign in before the episode is made, so an expired or revoked token is found in seconds, not
-        after the render. Raises ``YouTubeSignInError`` with what to do about it."""
-        from google.auth.exceptions import RefreshError
+        after the render. Raises ``YouTubeSignInError`` with what to do about it. A network blip or a
+        Google outage proves nothing, so it only logs and leaves the upload to try again at the end."""
+        from google.auth.exceptions import RefreshError, TransportError
         from google.auth.transport.requests import Request
 
         try:
             self.credentials().refresh(Request())
         except RefreshError as exc:
+            if getattr(exc, "retryable", False):
+                log.warning("the YouTube sign-in check didn't get an answer (%s); trying again at upload", exc)
+                return
             raise YouTubeSignInError(f"Google refused the saved YouTube sign-in ({exc})") from exc
+        except TransportError as exc:
+            log.warning("the YouTube sign-in check couldn't reach Google (%s); trying again at upload", exc)
 
     def upload(self, video: Path, episode: Episode) -> UploadResult:
         from googleapiclient.discovery import build
+        from googleapiclient.errors import HttpError
         from googleapiclient.http import MediaFileUpload
 
         write_metadata(video, episode)
@@ -157,13 +171,17 @@ class YouTubeUploader:
         resp, drops = None, 0
         while resp is None:
             try:
-                # Retries 5xx and rate limits itself and resumes the same upload session.
-                _, resp = req.next_chunk(num_retries=5)
-            except (OSError, _http_errors()) as exc:  # a dropped connection mid-chunk: resume where it stopped
+                # No retries inside the client: it would resend a chunk it has already read (an empty body).
+                # After an error the next call asks YouTube how much arrived and resumes from there.
+                _, resp = req.next_chunk(num_retries=0)
+            except (OSError, HttpError, _http_errors()) as exc:
+                status = getattr(getattr(exc, "resp", None), "status", None)
+                if isinstance(exc, HttpError) and status not in RETRY_STATUSES:
+                    raise  # a rejection (bad metadata, quota): trying again won't help
                 drops += 1
-                if drops > 3:
+                if drops > UPLOAD_RETRIES:
                     raise
-                log.warning("      upload connection dropped (%s); resuming", exc)
+                log.warning("      upload interrupted (%s); resuming", exc)
                 time.sleep(5 * drops)
         return UploadResult(self.name, f"https://youtube.com/shorts/{resp['id']}")
 

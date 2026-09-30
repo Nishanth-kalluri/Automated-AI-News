@@ -112,6 +112,7 @@ jobs:
             output/*/short.mp4
             output/*/*.json
             output/*/captions.ass
+            output/*/upload.txt
             output/*/shadow/short.mp4
             output/*/shadow/*.json
             output/*/shadow/captions.ass

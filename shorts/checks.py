@@ -325,16 +325,18 @@ def _speech_problems(text: str, banned: set[str] | tuple[str, ...] = (), *, outr
     return problems
 
 
-def _spaced(text: str) -> str:
-    return f" {' '.join(_words(text))} "
+def _bare(words: list[str]) -> str:
+    """Words without what follows an apostrophe ("desk's", "quackers'll"), spaced for whole-word matching."""
+    return f" {' '.join(w.split(chr(39))[0] for w in words)} "
 
 
-def intro_shape_problems(text: str, host: str, show: str, first_text: str = "", first_names: str = "") -> list[str]:
+def intro_shape_problems(text: str, host: str, show: str, first_text: str = "", first_names: str = "",
+                         other_text: str = "") -> list[str]:
     """Whether the intro works as one opening: short, greets the viewer as the host or names the show
     early, doesn't end on a question, and leaves story 1's facts to story 1's segment, which follows it.
 
     ``first_text`` is story 1's segment; ``first_names`` its headline and title, whose words the intro
-    may use to name it.
+    may use to name it; ``other_text`` the other stories' segments, whose phrases a tease may share.
     """
     problems = []
     n = len(text.split())
@@ -343,15 +345,15 @@ def intro_shape_problems(text: str, host: str, show: str, first_text: str = "", 
     elif n < INTRO_WORDS[0]:
         problems.append(f"is only {n} words; greet the viewer, then lead into the news")
     names = [x for x in (host, show) if _words(x)]
-    head = " " + " ".join(_words(text)[:INTRO_GREET_WITHIN]) + " "
-    if names and not any(_spaced(x) in head for x in names):
+    head = _bare(_words(text)[:INTRO_GREET_WITHIN])
+    if names and not any(_bare(_words(x)) in head for x in names):
         problems.append(f"doesn't greet the viewer as {host} or name {show} in its first words")
     sentences = _sentences(text)
     if sentences and sentences[-1].rstrip().rstrip("\"'\u201d").endswith("?"):
         problems.append("ends on a question; end by handing over to the first story")
     if first_text:
         skip = _FILLER | {w.removesuffix("'s") for w in _words(f"{first_names} {host} {show}")}
-        run = shared_run(text, first_text, skip=skip)
+        run = shared_run(text, first_text, skip=skip, unless_in=other_text) or shared_sentence(text, first_text, 6)
         if run:
             problems.append(f'repeats the first story ("{run}"); name it in a few words and leave its facts to '
                             "its segment")
@@ -399,7 +401,8 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
                 first = segs[0] if segs else None
                 names = f"{stories[0].headline} {stories[0].title} " if stories else ""
                 problems += intro_shape_problems(seg.text, host, show, first.text if first else "",
-                                                 names + (first.headline if first else ""))
+                                                 names + (first.headline if first else ""),
+                                                 " \n".join(s.text for s in segs[1:]))
         if problems:
             issues.append(Issue(code, f"{where} {'; '.join(problems)}"))
     for i, (seg, story) in enumerate(zip(segs, stories)):

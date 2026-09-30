@@ -57,7 +57,7 @@ def notify(notifier: Notifier, subject: str, text: str) -> None:
 
 
 def run_url() -> str:
-    """This GitHub Actions run's page, where its download (the video and upload.json) is; "" elsewhere."""
+    """This GitHub Actions run's page, where its download (the video and upload.txt) is; "" elsewhere."""
     server, repo, run_id = (os.environ.get(k, "").strip()
                             for k in ("GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_RUN_ID"))
     return f"{server}/{repo}/actions/runs/{run_id}" if server and repo and run_id else ""

@@ -486,6 +486,9 @@ class CriticWriter:
     def revise(self, episode: Episode, stories: list[Story], problems: list[Issue], *, stage: str) -> Episode:
         user = REVISE_PROMPT.format(problems="\n".join(p.line() for p in problems), script=_script_rows(episode),
                                     material=_story_block(stories, self.base.banned))
+        recent = "".join(f"- {t}\n" for t in self.base.recent_intros)
+        if recent and any(p.code in ("intro_problem", "missing_intro") for p in problems):
+            user += f"\n\nRecent intros (greet and tease differently from all of these):\n{recent}"
         data = self.llm.json(self.base.system(len(stories)), user, stage=stage, schema=REVISION_SCHEMA)
         whole_script = any(p.index is None and p.code not in FRAME_CODES for p in problems)
         allowed = set(range(len(stories))) if whole_script else {p.index for p in problems}
@@ -578,10 +581,12 @@ class CriticWriter:
             return any(words & said for words in gone)
 
         title, description = episode.title, _own_description(episode)
-        if teases(episode.segments[0].text):
-            # the intro teased a story that's gone
+        # The intro hands over to story 1: without it, it would tease the new first story as "coming up".
+        why = ("teased a story that was left out" if teases(episode.segments[0].text) else
+               "led into the first story, which was left out" if 0 in bad else "")
+        if why and kept_stories:
             segments[0] = self.template.intro_for(kept_stories, segments[1:-1], self.frame(), self.base.banned)
-            self.report["fallbacks"].append({"part": "intro", "why": "teased a story that was left out"})
+            self.report["fallbacks"].append({"part": "intro", "why": why})
         if kept_stories and teases(title):
             title = self.template.write(kept_stories).title
             self.report["fallbacks"].append({"part": "title", "why": "named a story that was left out"})

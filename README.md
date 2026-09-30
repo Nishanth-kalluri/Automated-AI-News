@@ -103,7 +103,7 @@ Each run writes `output/<timestamp>/`:
 | `host/`, `cards/` | duck sprites and per-segment backgrounds |
 | `timeline.json`, `captions.ass` | what the renderer draws, and when |
 | `short.mp4` | the 1080x1920 video |
-| `qa.json`, `cost.json`, `upload.json` | checks, LLM calls and dollars spent, YouTube metadata |
+| `qa.json`, `cost.json`, `upload.json`, `upload.txt` | checks, LLM calls and dollars spent, YouTube metadata (the `.txt` is ready to paste for a hand upload) |
 
 ## Stages and how to swap them
 
@@ -218,8 +218,8 @@ and remove `SHORTS_SHADOW`; to roll back, set `SHORTS_WEB=off`.
    form](https://support.google.com/youtube/contact/yt_api_form): your project number, and that
    it is an internal tool that uploads one AI news Short a day to your own channel. Until it
    passes, YouTube keeps every API upload **private**, and Studio can't make them public. To air
-   an episode before then, upload `short.mp4` from the run's download by hand with the title and
-   description in `upload.json`.
+   an episode before then, upload `short.mp4` from the run's download by hand, pasting the title,
+   description and tags from `upload.txt`.
 8. When the audit passes, set the variable `SHORTS_YOUTUBE_PRIVACY=public` (or `unlisted`).
 
 Uploads go out with the title plus `#Shorts`, the description and its Sources links (with any

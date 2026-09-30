@@ -14,7 +14,7 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("run", help="run the full pipeline (default)")
     r.add_argument("--upload", action="store_true",
-                   help="publish with SHORTS_UPLOADER (otherwise only writes upload.json)")
+                   help="publish with SHORTS_UPLOADER (otherwise only writes upload.json and upload.txt)")
     r.add_argument("--offline", action="store_true",
                    help="sample news, template script, silent voice: no network or keys needed")
     r.add_argument("--stories", type=int, help="stories per video")
