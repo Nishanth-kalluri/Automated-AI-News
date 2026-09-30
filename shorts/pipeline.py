@@ -27,12 +27,13 @@ from .content import banned_names, description_problem
 from .coverage import Coverage
 from .llm import SpendLedger, Usage, build_llm, with_model
 from .models import Episode, Story
-from .notify import build_notifier, notify
+from .notify import build_notifier, notify, run_url
+from .outro import OutroLog
 from .qa import QAReport, check
 from .research import AgentResearcher, build_researcher, research, swap_failing
 from .selection import HeuristicEditor, SeenStore, build_editor, drop_duplicates, pick_with_fallback, settle
 from .sources import build_sources, fetch_all
-from .upload import build_uploader
+from .upload import LocalUploader, Uploader, build_uploader, upload_hint
 from .visuals import StoryCards
 from .voice import build_voice, lineup, narrate, parse_lineup
 from .web import TavilyCredits, build_web
@@ -83,6 +84,8 @@ def _cost(usage: Usage, ledger: SpendLedger, cfg: Config, credits: TavilyCredits
 
 
 def run(cfg: Config, *, upload: bool = False) -> Path:
+    if not cfg.outro:  # today's subscribe line from the rotation; the shadow run gets the same one
+        cfg = replace(cfg, outro=OutroLog(cfg.state_dir / "outros.json").next())
     run_dir = cfg.output_dir / datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir(parents=True, exist_ok=True)
     ledger = SpendLedger(cfg.state_dir / "spend.json")
@@ -164,6 +167,9 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     else:
         seen = SeenStore(cfg.state_dir / "seen_urls.json")
         rec.seen = copy.deepcopy(seen)
+    # Sign in to YouTube before spending anything: a refused sign-in still makes the episode, for a
+    # hand upload, and the email says what to fix.
+    uploader, upload_problem = _uploader(cfg, upload and not shadow)
     llm = build_llm(cfg, usage)
     agents = cfg.agents and llm is not None
     offline = cfg.sources == ["sample"]
@@ -267,10 +273,15 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     if not report.passed:
         raise RuntimeError("Quality check failed: " + "; ".join(report.problems))
 
-    live_upload = upload and not shadow
-    uploader = build_uploader(cfg) if live_upload else build_uploader(replace(cfg, uploader="local"))
     log.info("[9/9] publishing with %s uploader", uploader.name)
-    result = uploader.upload(video, episode)
+    try:
+        result = uploader.upload(video, episode)
+    except Exception as exc:
+        if isinstance(uploader, LocalUploader):
+            raise
+        log.warning("      the %s upload failed (%s); keeping the video for a hand upload", uploader.name, exc)
+        upload_problem = upload_hint(exc)
+        result = LocalUploader().upload(video, episode)
     log.info("      %s", result.location)
     if shadow:
         return video
@@ -278,6 +289,7 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     if not offline:
         seen.add(stories)
         intros.add(episode.segments[0].text)
+        OutroLog(cfg.state_dir / "outros.json").add(episode.segments[-1].text)
         # For `shorts voices`: the script only. The state branch is public, so no article text.
         (cfg.state_dir / "last_episode.json").write_text(episode_json(replace(episode, stories=[])))
     voices = ""
@@ -288,14 +300,47 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
                   "They're in the run's download (episode.zip, voices folder), with voices.txt saying how to pick one.")
     headlines = "\n".join(f"{i}. {s.headline}  {s.url}" for i, s in enumerate(episode.story_segments, 1))
     notify(build_notifier(cfg),
-           f"New episode ready: {episode.title}",
-           f"{result.location}\n\nUploaded as {cfg.youtube_privacy if result.uploader == 'youtube' else 'a local file'}. "
-           f"Review it and make it public in YouTube Studio.\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
+           f"New episode ready{', NOT uploaded' if upload_problem else ''}: {episode.title}",
+           f"{_where(cfg, result, upload, upload_problem)}\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
            f"Cost: ${usage.total_usd:.2f} (${usage.month_spent_usd + usage.total_usd:.2f} this month); "
            f"Tavily {credits.run_used} credits ({credits.this_month()}/{cfg.tavily_monthly_credits} this month)\n"
            f"Warnings: {'; '.join(report.warnings) or 'none'}{voices}")
     log.info("done: %s", video)
     return video
+
+
+def _uploader(cfg: Config, live_upload: bool) -> tuple[Uploader, str]:
+    """This run's uploader, signed in already, and "" or what is wrong with it (then the local uploader)."""
+    if not live_upload or cfg.uploader == "local":
+        return LocalUploader(), ""
+    try:
+        uploader = build_uploader(cfg)
+        check = getattr(uploader, "check", None)
+        if check:
+            check()
+        return uploader, ""
+    except Exception as exc:
+        log.warning("the %s uploader isn't usable (%s); the episode is made for a hand upload", cfg.uploader, exc)
+        return LocalUploader(), upload_hint(exc)
+
+
+def _where(cfg: Config, result, upload: bool, problem: str) -> str:
+    """The email's first lines: where the video went, and what to do with it."""
+    url = run_url()
+    download = (f"The video (short.mp4) and upload.json (title, description, tags) are in the run's download: {url}"
+                if url else f"The video and upload.json are in {Path(result.location).parent}.")
+    if problem:
+        return f"NOT uploaded to YouTube: {problem}\n\n{download}"
+    if result.uploader == "youtube":
+        text = f"Uploaded to YouTube as {cfg.youtube_privacy}: {result.location}"
+        if cfg.youtube_privacy == "private":
+            text += ("\n\nUntil the Google Cloud project passes YouTube's API audit, YouTube keeps uploads from it "
+                     "private, and Studio can't make them public. To air this one before then, upload short.mp4 by "
+                     f"hand with the title and description in upload.json. {download}\nOnce the audit passes, set "
+                     "the variable SHORTS_YOUTUBE_PRIVACY to public.")
+        return text
+    why = "this run was started without upload" if cfg.uploader != "local" else "SHORTS_UPLOADER is local"
+    return f"Not uploaded ({why}). {download}"
 
 
 def _refill(stories: list[Story], min_n: int, n: int, candidates: list[Story], seen: SeenStore,

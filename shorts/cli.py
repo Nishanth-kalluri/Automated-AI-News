@@ -19,7 +19,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="sample news, template script, silent voice: no network or keys needed")
     r.add_argument("--stories", type=int, help="stories per video")
 
-    a = sub.add_parser("youtube-auth", help="one-time OAuth login; prints YOUTUBE_REFRESH_TOKEN")
+    a = sub.add_parser("youtube-auth", help="one-time YouTube sign-in; prints the three YOUTUBE_* secrets")
     a.add_argument("client_secret", help="path to the OAuth client JSON from Google Cloud Console")
 
     v = sub.add_parser("voices", help="read a finished script with several voices, to compare them")
@@ -34,7 +34,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "youtube-auth":
         from .upload import youtube_auth_flow
 
-        print("YOUTUBE_REFRESH_TOKEN=" + youtube_auth_flow(args.client_secret))
+        secrets = youtube_auth_flow(args.client_secret)
+        if not secrets["YOUTUBE_REFRESH_TOKEN"]:
+            print("Google sent no refresh token. Remove the app's access at myaccount.google.com/permissions "
+                  "and run this again.")
+            return 1
+        print("\nAdd these as repository secrets (GitHub: Settings, Secrets and variables, Actions, "
+              "New repository secret), name on the left, value on the right of the = sign:\n")
+        for name, value in secrets.items():
+            print(f"{name}={value}")
         return 0
 
     if args.cmd == "voices":
@@ -59,13 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "stories", None):
         cfg.stories_per_video = args.stories
 
-    from .notify import build_notifier, notify
+    from .notify import build_notifier, notify, run_url
     from .pipeline import run
 
     try:
         run(cfg, upload=getattr(args, "upload", False))
     except Exception as exc:
-        notify(build_notifier(cfg), f"{cfg.show_name} run failed: {exc}"[:150], traceback.format_exc())
+        url = run_url()
+        where = (f"The run's log and download (anything it made, like short.mp4 if the video rendered): {url}\n\n"
+                 if url else "")
+        notify(build_notifier(cfg), f"{cfg.show_name} run failed: {exc}"[:150], where + traceback.format_exc())
         raise
     return 0
 

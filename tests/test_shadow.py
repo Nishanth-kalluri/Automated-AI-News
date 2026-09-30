@@ -405,7 +405,7 @@ def test_shadow_run_writes_its_folder_and_leaves_production_alone(monkeypatch, t
     video = pipeline.run(rig.cfg, upload=True)
     run_dir, out = video.parent, video.parent / "shadow"
     assert video == run_dir / "short.mp4" and rig.uploads == [video]  # only production went to YouTube
-    assert rig.uploaders == ["youtube", "local"] and not (run_dir / "upload.json").exists()
+    assert rig.uploaders == ["youtube"] and not (run_dir / "upload.json").exists()  # the shadow's is local
     assert json.loads((out / "upload.json").read_text())["file"] == "short.mp4"
     for name in ("02-picks.json", "02-research.json", "02-coverage.json", "03-episode.json", "compare.json",
                  "cost.json", "qa.json"):

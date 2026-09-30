@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .content import (copied_run, is_aggregator_url, is_newsletter_url, repetition, says_little, script_problems,
-                      shared_sentence)
+from .content import (_sentences, _words, copied_run, is_aggregator_url, is_newsletter_url, repetition, says_little,
+                      script_problems, shared_run, shared_sentence)
 from .models import Episode, Story
 
 SAMPLE_URL_PREFIX = "https://example.com/sample/"
@@ -22,6 +22,8 @@ WORDS_PER_SECOND = 2.6  # same pace the silent voice uses
 SEGMENT_GAP = 0.3
 TARGET_MAX_SECONDS = 170  # leaves headroom under the 180 s Shorts limit
 HYPE_WORDS = ("revolutionary", "game-changer", "game changer", "mind-blowing", "mind blowing")
+INTRO_WORDS = (10, 26)  # the writer aims for 14-22: a short greeting, a tease, a hand-over to story 1
+INTRO_GREET_WITHIN = 10  # the host's or the show's name comes in this many first words
 TITLE_MAX = 91  # the uploader appends " #Shorts" and YouTube allows 100 characters
 
 _URL_RE = re.compile(r"https?://[^\s)>\]\"'<]+")
@@ -323,15 +325,49 @@ def _speech_problems(text: str, banned: set[str] | tuple[str, ...] = (), *, outr
     return problems
 
 
+def _spaced(text: str) -> str:
+    return f" {' '.join(_words(text))} "
+
+
+def intro_shape_problems(text: str, host: str, show: str, first_text: str = "", first_names: str = "") -> list[str]:
+    """Whether the intro works as one opening: short, greets the viewer as the host or names the show
+    early, doesn't end on a question, and leaves story 1's facts to story 1's segment, which follows it.
+
+    ``first_text`` is story 1's segment; ``first_names`` its headline and title, whose words the intro
+    may use to name it.
+    """
+    problems = []
+    n = len(text.split())
+    if n > INTRO_WORDS[1]:
+        problems.append(f"is {n} words; keep it to 14-22")
+    elif n < INTRO_WORDS[0]:
+        problems.append(f"is only {n} words; greet the viewer, then lead into the news")
+    names = [x for x in (host, show) if _words(x)]
+    head = " " + " ".join(_words(text)[:INTRO_GREET_WITHIN]) + " "
+    if names and not any(_spaced(x) in head for x in names):
+        problems.append(f"doesn't greet the viewer as {host} or name {show} in its first words")
+    sentences = _sentences(text)
+    if sentences and sentences[-1].rstrip().rstrip("\"'\u201d").endswith("?"):
+        problems.append("ends on a question; end by handing over to the first story")
+    if first_text:
+        skip = _FILLER | {w.removesuffix("'s") for w in _words(f"{first_names} {host} {show}")}
+        run = shared_run(text, first_text, skip=skip)
+        if run:
+            problems.append(f'repeats the first story ("{run}"); name it in a few words and leave its facts to '
+                            "its segment")
+    return problems
+
+
 def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
                  banned: set[str] | tuple[str, ...] = (), recent_intros: list[str] | tuple[str, ...] = (),
-                 description: str | None = None) -> list[Issue]:
+                 description: str | None = None, host: str = "", show: str = "") -> list[Issue]:
     """Script rules the writer is told about, checked in code rather than trusted.
 
     ``frame`` is what else the intro and outro may mention: the show, the host and today's date.
     ``banned`` adds today's newsletter names to the ones the show never says. ``recent_intros`` are
     the last episodes' intros, which today's must not open like. ``description`` is the writer's own
-    YouTube description, without the sources footer.
+    YouTube description, without the sources footer. ``host`` and ``show`` turn on the checks that the
+    intro greets as the host and flows into story 1 (``intro_shape_problems``).
     """
     issues: list[Issue] = []
     kinds = [s.kind for s in episode.segments]
@@ -359,6 +395,11 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
                 problems.append(f'opens with "{start}", like a recent episode; use a fresh hook')
             if shared_sentence(seg.text, signoff):
                 problems.append("says the show's sign-off, which only the outro says")
+            if host or show:
+                first = segs[0] if segs else None
+                names = f"{stories[0].headline} {stories[0].title} " if stories else ""
+                problems += intro_shape_problems(seg.text, host, show, first.text if first else "",
+                                                 names + (first.headline if first else ""))
         if problems:
             issues.append(Issue(code, f"{where} {'; '.join(problems)}"))
     for i, (seg, story) in enumerate(zip(segs, stories)):

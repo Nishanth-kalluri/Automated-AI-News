@@ -33,10 +33,14 @@ are checked in code, not just asked of the models:
 - Duplicates are caught by headline comparison and then by a second model look.
 - Fewer stories beats weak ones: up to `SHORTS_STORIES_PER_VIDEO` (8), at least
   `SHORTS_MIN_STORIES` (4), else no episode that day.
-- The intro opens with a fresh hook each day (the last 7 intros are kept in
-  `state/intros.json` and the writer must open differently). The outro is fixed:
-  "Subscribe so you don't get lost in the storm of AI news. That's the news from the pond.
-  See you tomorrow!" (`SHORTS_OUTRO`).
+- The intro is one short thought: the host greets the viewer, teases the day's other big
+  stories and hands over to the first one, without saying anything the first story's segment
+  says. The greeting is fresh each day (the last 7 intros are kept in `state/intros.json` and
+  the writer must open differently), and code checks the greeting, the length, the hand-over
+  and repeats; the critic checks that it hangs together.
+- The outro is a subscribe line with a playful threat, a different one each day from 24 in
+  `shorts/outro.py` (rotated through `state/outros.json`), then the fixed sign-off "That's the
+  news from the pond. See you tomorrow!". `SHORTS_OUTRO` sets one fixed outro instead.
 
 With an LLM key, the two judgement stages run as agents (`SHORTS_AGENTS=on`, the default):
 
@@ -112,7 +116,7 @@ Each run writes `output/<timestamp>/`:
 | Voice | edge-tts `en-US-AnaNeural` at +18% (free), or OpenAI voices (`SHORTS_VOICE=openai`); script trimmed if the audio runs past 170 s | internet (OpenAI: `OPENAI_API_KEY`) | silence, which fails QA | ElevenLabs designed voice |
 | Host | puppet duck, bill moves with the voice loudness | – | – | Kling AI Avatar (`SHORTS_ANIMATOR`) |
 | Render | cards + duck + desk + karaoke captions, one ffmpeg call | – | – | Remotion |
-| Upload | `local` (metadata only) or `youtube` (private, marked synthetic) | YouTube OAuth secrets | – | public after API audit |
+| Upload | `local` (metadata only) or `youtube` (private until the API audit, marked synthetic) | YouTube OAuth secrets | local, when YouTube refuses the sign-in or the upload | |
 | Notify | email from the AgentMail inbox | `SHORTS_NOTIFY_EMAIL` | log line | Telegram approve button |
 
 To add an implementation, write a class with the stage's method and register it in that
@@ -141,6 +145,8 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_SHADOW` | variable | optional, `on` for the shadow week (see below) |
 | `SHORTS_TAVILY_MONTHLY_CREDITS`, `SHORTS_TAVILY_RUN_CREDITS` | variables | optional, default `700` and `25` |
 | `SHORTS_UPLOADER` | variable | `youtube` once the YouTube secrets are in |
+| `SHORTS_YOUTUBE_PRIVACY` | variable | optional, `private` (default) until the YouTube API audit passes, then `public` or `unlisted` |
+| `SHORTS_OUTRO` | variable | optional, one fixed outro instead of the daily subscribe line rotation |
 | `SHORTS_STORIES_PER_VIDEO`, `SHORTS_MIN_STORIES` | variables | optional, default `8` and `4` |
 | `SHORTS_SOURCES` | variable | optional, default `newsletter,rss` |
 | `SHORTS_VOICE`, `SHORTS_EDGE_VOICE`, `SHORTS_EDGE_RATE`, `SHORTS_OPENAI_VOICE`, `SHORTS_OPENAI_TTS_MODEL` | variables | optional; see "Choosing a voice" |
@@ -176,13 +182,46 @@ and remove `SHORTS_SHADOW`; to roll back, set `SHORTS_WEB=off`.
 
 ## YouTube upload setup (one time)
 
-1. In Google Cloud Console, create a project and enable **YouTube Data API v3**.
-2. Configure the OAuth consent screen (External, scope `youtube.upload`) and set its
-   publishing status to **In production**. In *Testing* mode refresh tokens expire after
-   7 days and the daily upload stops working.
-3. Create an **OAuth client ID** of type *Desktop app* and download the JSON.
-4. On your own machine: `python -m shorts youtube-auth client_secret.json`, sign in with
-   the channel's Google account, and store the printed `YOUTUBE_REFRESH_TOKEN` plus the
-   client ID and secret as repository secrets.
-5. Set the variable `SHORTS_UPLOADER=youtube`. Videos upload as `private`: until the
-   Google Cloud project passes YouTube's API audit, API uploads can only be private.
+1. In YouTube Studio for the show's channel: Settings, Channel, Advanced settings, Audience:
+   choose "No, set this channel as not made for kids".
+2. In [Google Cloud Console](https://console.cloud.google.com), create a project (for example
+   "Duck Desk uploader") and note its project number. In APIs & Services, Library, enable
+   **YouTube Data API v3**.
+3. Google Auth Platform (formerly "OAuth consent screen"):
+   - **Branding**: an app name and your email.
+   - **Audience**: user type External, then **Publish app** so the status says *In production*.
+     In *Testing*, Google ends the sign-in after 7 days and the daily upload stops. You don't
+     need Google's verification for your own channel.
+   - **Data Access**: add the scope `https://www.googleapis.com/auth/youtube.upload`.
+   - **Clients**: create a client of type *Desktop app* and download its JSON as
+     `client_secret.json`. Never commit it.
+4. On your own computer (Python 3.10+):
+   ```bash
+   git clone https://github.com/Nishanth-kalluri/Automated-AI-News.git
+   cd Automated-AI-News
+   python -m venv .venv            # then: .venv\Scripts\activate (Windows) or source .venv/bin/activate
+   pip install -e ".[youtube]"
+   python -m shorts youtube-auth path/to/client_secret.json
+   ```
+   Sign in with the channel's Google account and pick the channel if asked. Google warns that it
+   hasn't verified the app: that's your own app, so click Advanced, then Go to the app, then
+   Continue. The command prints `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET` and
+   `YOUTUBE_REFRESH_TOKEN`.
+5. In the GitHub repository, Settings, Secrets and variables, Actions: add those three as
+   **secrets**, and the **variable** `SHORTS_UPLOADER=youtube`.
+6. Test it: Actions, Daily AI Short, Run workflow (with *upload* ticked). A run started by hand is
+   that day's episode, so the scheduled run may then find too few new stories. The email links the
+   upload. Every run signs in to YouTube before it starts: if Google refuses, the episode is still
+   made, and the email says it wasn't uploaded and what to fix (usually: run step 4 again and
+   replace `YOUTUBE_REFRESH_TOKEN`).
+7. Apply for YouTube's API audit with the [API Services audit and quota extension
+   form](https://support.google.com/youtube/contact/yt_api_form): your project number, and that
+   it is an internal tool that uploads one AI news Short a day to your own channel. Until it
+   passes, YouTube keeps every API upload **private**, and Studio can't make them public. To air
+   an episode before then, upload `short.mp4` from the run's download by hand with the title and
+   description in `upload.json`.
+8. When the audit passes, set the variable `SHORTS_YOUTUBE_PRIVACY=public` (or `unlisted`).
+
+Uploads go out with the title plus `#Shorts`, the description and its Sources links (with any
+newsletter tracking parameters removed), the tags, Science & Technology, English, "not made for
+kids" and YouTube's "altered or synthetic content" label.

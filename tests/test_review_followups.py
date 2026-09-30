@@ -201,14 +201,16 @@ def test_a_dropped_story_leaves_no_trace_in_the_intro_title_or_description():
     stories = [*_stories(), _lazy_story()]
     forum = ("Over on Reddit, users say GPT-6 now gives shorter answers than GPT-5 did. OpenAI says it is looking "
              "into the reports and will share an update soon. People notice quickly when a model changes.")
-    script = _script(GOOD_A, GOOD_B, forum, intro="Quack! Is GPT-6 lazy? Plus a travel agent and a faster chip.")
+    script = _script(GOOD_A, GOOD_B, forum,
+                     intro="Quack, it's Quackers on Duck Desk! GPT-6 may be lazy, plus a faster chip. First, a travel agent.")
     script["title"] = "Lazy GPT-6, travel agents and faster chips"
     script["description"] = "Is GPT-6 lazy? Also a travel agent and a faster chip."
     llm = ScriptedLLM(script, NO_ISSUES)
     writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0)
     ep = writer.write(stories)
     template = TemplateWriter("Duck Desk", "Quackers")
-    assert ep.segments[0].text == template.intro(2).text
+    assert ep.segments[0].text == template.intro_for(stories[:2], ep.story_segments).text
+    assert {"part": "intro", "why": "teased a story that was left out"} in writer.report["fallbacks"]
     assert ep.title == template.write(stories[:2]).title and "GPT-6" not in ep.title
     assert ep.description.startswith(default_description(stories[:2]) + "\n\nSources:\n")
     assert "GPT-6" not in ep.description
@@ -301,7 +303,7 @@ def test_outro_card_asks_to_subscribe():
     from shorts import visuals
     source = open(visuals.__file__).read()
     assert "Subscribe for tomorrow's" in source and "Follow for tomorrow's" not in source
-    assert "Subscribe" in DEFAULT_OUTRO
+    assert "subscribe" in DEFAULT_OUTRO.lower()
 
 
 def test_last_episode_state_holds_the_script_not_the_articles(tmp_path):
@@ -462,7 +464,7 @@ def test_words_a_dropped_story_shares_with_kept_ones_do_not_count_as_a_tease():
     stories[1].summary += " It is built for chatbots like GPT-6."
     forum = ("Over on Reddit, users say GPT-6 now gives shorter answers than GPT-5 did. OpenAI says it is looking "
              "into the reports and will share an update soon. People notice quickly when a model changes.")
-    intro = "Quack! A travel agent books trips, and a faster chip for GPT-6 is here."
+    intro = "Quack, it's Quackers on Duck Desk! A faster chip for GPT-6 is ahead. First, a travel agent."
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B, forum, intro=intro), NO_ISSUES)
     writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0)
     ep = writer.write(stories)
