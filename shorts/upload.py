@@ -1,11 +1,13 @@
 """Stage 10: publish the video (or just record what would be published)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import time
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -23,6 +25,9 @@ TAGS_MAX_CHARS = 450
 _URL = re.compile(r"https?://\S+")
 RETRY_STATUSES = (429, 500, 502, 503, 504)  # YouTube busy or down for a moment: resume the upload
 UPLOAD_RETRIES = 5
+RENEW_NOTICE_DAYS = 2  # the email starts reminding this many days before the sign-in ends
+RENEW_STEPS = ("On your PC, run python -m shorts youtube-auth client_secret.json and replace the "
+               "YOUTUBE_REFRESH_TOKEN secret with the new value.")
 
 
 def youtube_title(episode: Episode) -> str:
@@ -210,13 +215,58 @@ def upload_hint(exc: Exception) -> str:
         return (f"{text}. Add it under Settings, Secrets and variables, Actions in the GitHub repository "
                 "(see the README's YouTube upload setup).")
     if isinstance(exc, YouTubeSignInError) or "invalid_grant" in text:
-        return (f"{text[:300]}. The YouTube sign-in expired or was revoked. On your PC, run "
-                "python -m shorts youtube-auth client_secret.json again and replace the YOUTUBE_REFRESH_TOKEN "
-                "secret with the new value. If the Google Cloud app is still in Testing, publish it "
-                "(In production) first, or the new sign-in also stops working after 7 days.")
+        return (f"{text[:300]}. The YouTube sign-in expired or was revoked. {RENEW_STEPS} While the Google "
+                "Cloud app is in Testing, Google ends each sign-in 7 days after you sign in, so this is "
+                "expected once a week.")
     if "quotaExceeded" in text or "uploadLimitExceeded" in text:
         return f"YouTube's daily upload limit was reached ({text[:200]}). Tomorrow's run uploads as usual."
     return f"{type(exc).__name__}: {text[:300]}"
+
+
+class SignInLog:
+    """When this run first saw the current YouTube sign-in, so the email can say when to renew it.
+
+    Google ends sign-ins 7 days after consent while the Google Cloud app is in Testing, and nothing in
+    the token says when. The state branch is public, so it keeps a short fingerprint of the refresh
+    token, never the token itself.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def since(self, token: str, today: date) -> date:
+        """The day this token was first seen, recording today if it is new."""
+        mark = hashlib.sha256(token.encode()).hexdigest()[:12]
+        try:
+            data = json.loads(self.path.read_text())
+            if data.get("token") == mark:
+                return date.fromisoformat(data["since"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps({"token": mark, "since": today.isoformat()}) + "\n")
+        return today
+
+
+def renew_reminder(cfg: Config, today: date | None = None) -> str:
+    """"" or a line for the email when the YouTube sign-in ends within RENEW_NOTICE_DAYS days.
+
+    The sign-in may have been made the day before this run first saw it, so the last safe day is
+    a day early: a sign-in first seen on Monday is renewed by Sunday.
+    """
+    token = os.environ.get("YOUTUBE_REFRESH_TOKEN", "").strip()
+    if cfg.youtube_signin_days <= 0 or not token:
+        return ""
+    today = today or datetime.now(timezone.utc).date()
+    since = SignInLog(cfg.state_dir / "youtube_signin.json").since(token, today)
+    last = since + timedelta(days=cfg.youtube_signin_days - 1)
+    left = (last - today).days
+    if not 0 <= left <= RENEW_NOTICE_DAYS:  # still signed in after the end: the app was published
+        return ""
+    when = ("today, or tomorrow's upload may fail" if left == 0 else "by tomorrow" if left == 1
+            else f"by {last:%A, %B} {last.day}")
+    return (f"Renew the YouTube sign-in {when}. Google ends it {cfg.youtube_signin_days} days after you sign in "
+            f"while the Google Cloud app is in Testing. {RENEW_STEPS}")
 
 
 def _client_ids(client_secret_file: str) -> tuple[str, str]:

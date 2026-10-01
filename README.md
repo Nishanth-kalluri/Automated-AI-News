@@ -146,6 +146,7 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_TAVILY_MONTHLY_CREDITS`, `SHORTS_TAVILY_RUN_CREDITS` | variables | optional, default `700` and `25` |
 | `SHORTS_UPLOADER` | variable | `youtube` once the YouTube secrets are in |
 | `SHORTS_YOUTUBE_PRIVACY` | variable | optional, `private` (default) until the YouTube API audit passes, then `public` or `unlisted` |
+| `SHORTS_YOUTUBE_SIGNIN_DAYS` | variable | optional, `7` (default) while the Google Cloud app is in Testing: the email reminds you two days before the sign-in ends. `0` once the app is published |
 | `SHORTS_OUTRO` | variable | optional, one fixed outro instead of the daily subscribe line rotation |
 | `SHORTS_STORIES_PER_VIDEO`, `SHORTS_MIN_STORIES` | variables | optional, default `8` and `4` |
 | `SHORTS_SOURCES` | variable | optional, default `newsletter,rss` |
@@ -188,10 +189,14 @@ and remove `SHORTS_SHADOW`; to roll back, set `SHORTS_WEB=off`.
    "Duck Desk uploader") and note its project number. In APIs & Services, Library, enable
    **YouTube Data API v3**.
 3. Google Auth Platform (formerly "OAuth consent screen"):
-   - **Branding**: an app name and your email.
-   - **Audience**: user type External, then **Publish app** so the status says *In production*.
-     In *Testing*, Google ends the sign-in after 7 days and the daily upload stops. You don't
-     need Google's verification for your own channel.
+   - **Branding**: the app name, user support email and developer contact email. Leave the logo,
+     home page, privacy policy, terms and authorized domains empty.
+   - **Audience**: user type External (Internal needs a Google Workspace organization). Under
+     **Test users**, add the Google account that owns the channel, and leave the app in *Testing*.
+     Google then ends each sign-in 7 days after you sign in, so once a week run the last command
+     of step 4 again and replace `YOUTUBE_REFRESH_TOKEN`. The episode email reminds you two days
+     ahead. Publishing the app (*In production*) ends the weekly renewal, but Google asks for a home
+     page and privacy policy link for that. After publishing, set `SHORTS_YOUTUBE_SIGNIN_DAYS=0`.
    - **Data Access**: add the scope `https://www.googleapis.com/auth/youtube.upload`.
    - **Clients**: create a client of type *Desktop app* and download its JSON as
      `client_secret.json`. Never commit it.
