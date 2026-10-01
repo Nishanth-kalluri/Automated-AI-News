@@ -360,7 +360,7 @@ def test_a_refused_sign_in_says_what_to_do(monkeypatch):
     with pytest.raises(YouTubeSignInError) as caught:
         YouTubeUploader("private").check()
     hint = upload_hint(caught.value)
-    assert "youtube-auth" in hint and "YOUTUBE_REFRESH_TOKEN" in hint and "In production" in hint
+    assert "youtube-auth" in hint and "YOUTUBE_REFRESH_TOKEN" in hint and "7 days" in hint
     assert "needs the secret" not in hint
     assert "Secrets and variables" in upload_hint(YouTubeSignInError("YouTube upload needs the secret X"))
     assert "daily upload limit" in upload_hint(RuntimeError("<HttpError 403 ... quotaExceeded>"))

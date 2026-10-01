@@ -33,7 +33,7 @@ from .qa import QAReport, check
 from .research import AgentResearcher, build_researcher, research, swap_failing
 from .selection import HeuristicEditor, SeenStore, build_editor, drop_duplicates, pick_with_fallback, settle
 from .sources import build_sources, fetch_all
-from .upload import LocalUploader, Uploader, YouTubeSignInError, build_uploader, upload_hint
+from .upload import LocalUploader, Uploader, YouTubeSignInError, build_uploader, renew_reminder, upload_hint
 from .visuals import StoryCards
 from .voice import build_voice, lineup, narrate, parse_lineup
 from .web import TavilyCredits, build_web
@@ -285,6 +285,10 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     log.info("      %s", result.location)
     if shadow:
         return video
+    # Signed in to YouTube: note the sign-in's first day, and remind before Google ends it. A failed
+    # upload's own message comes first.
+    renew = renew_reminder(cfg) if uploader.name == "youtube" else ""
+    renew = "" if upload_problem else renew
 
     if not offline:
         seen.add(stories)
@@ -299,9 +303,13 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
         voices = (f"\n\nVoice lineup: {sum('file' in r for r in rows)} of {len(rows)} voices read this script. "
                   "They're in the run's download (episode.zip, voices folder), with voices.txt saying how to pick one.")
     headlines = "\n".join(f"{i}. {s.headline}  {s.url}" for i, s in enumerate(episode.story_segments, 1))
+    where = _where(cfg, result, upload, upload_problem)
+    if renew:
+        where += f"\n\n{renew}"
+    flag = ", NOT uploaded" if upload_problem else ", renew the YouTube sign-in" if renew else ""
     notify(build_notifier(cfg),
-           f"New episode ready{', NOT uploaded' if upload_problem else ''}: {episode.title}",
-           f"{_where(cfg, result, upload, upload_problem)}\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
+           f"New episode ready{flag}: {episode.title}",
+           f"{where}\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
            f"Cost: ${usage.total_usd:.2f} (${usage.month_spent_usd + usage.total_usd:.2f} this month); "
            f"Tavily {credits.run_used} credits ({credits.this_month()}/{cfg.tavily_monthly_credits} this month)\n"
            f"Warnings: {'; '.join(report.warnings) or 'none'}{voices}")

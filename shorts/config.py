@@ -102,6 +102,8 @@ class Config:
     x264_preset: str
     uploader: str
     youtube_privacy: str
+    # Days a YouTube sign-in lasts: 7 while the Google Cloud app is in Testing, 0 once it is published.
+    youtube_signin_days: int
     notify_email: str
     output_dir: Path
     state_dir: Path
@@ -154,6 +156,7 @@ class Config:
             x264_preset=_env("SHORTS_X264_PRESET", "medium"),
             uploader=_env("SHORTS_UPLOADER", "local").lower(),
             youtube_privacy=_privacy(_env("SHORTS_YOUTUBE_PRIVACY", "private")),
+            youtube_signin_days=int(_env("SHORTS_YOUTUBE_SIGNIN_DAYS", "7")),
             notify_email=_env("SHORTS_NOTIFY_EMAIL"),
             output_dir=Path(_env("SHORTS_OUTPUT_DIR", "output")),
             state_dir=Path(_env("SHORTS_STATE_DIR", "state")),
