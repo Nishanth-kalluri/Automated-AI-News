@@ -1,0 +1,99 @@
+{
+  "title": "Tavus Tests Lifelike Video AI, Apple Camera Rumor & More",
+  "description": "Tavus previews a video-call AI that some testers mistook for a person, while Apple is reportedly developing a security camera that describes activity without recording video. Quackers also covers new voice models, an Anthropic IPO report, and the rest of today's AI news.\n\nSources:\n- Tavus Unveils Lifelike Video-Call AI: https://www.tavus.io/griffin\n- Microsoft Releases Live Transcription and Voice Models: https://microsoft.ai/news/our-first-streaming-transcription-model/\n- Apple Reportedly Developing Camera Without Video\n- Anthropic Reportedly Targets November IPO\n- Cloudflare Open-Sources Agent Decision Models: https://blog.cloudflare.com/clef-decision-models/\n- DeepSeek Releases Tools for Huawei AI Chips: https://thenextweb.com/news/deepseek-huawei-ascend-tilelang-open-source-cuda\n- arXiv Caps Monthly Paper Submissions: https://blog.arxiv.org/2026/10/01/updated-rate-limit-policy/\n- Suno Adds AI-Generated Spoken Voices: https://www.theverge.com/ai-artificial-intelligence/1003925/suno-speech-ai-voice-feature-beta-availability\n\nMade with AI. #AI #AINews #Shorts",
+  "tags": [
+    "AI news",
+    "Duck Desk",
+    "Quackers",
+    "Tavus Griffin",
+    "Microsoft AI",
+    "Apple",
+    "Anthropic",
+    "Cloudflare Clef",
+    "DeepSeek",
+    "Suno"
+  ],
+  "segments": [
+    {
+      "kind": "intro",
+      "text": "Hey, duck pals, Quackers here! Apple's reported camera could describe activity without recording video. First, Tavus.",
+      "headline": "",
+      "key_fact": "",
+      "source": "",
+      "url": ""
+    },
+    {
+      "kind": "story",
+      "text": "Tavus previewed Griffin, a video-call AI that watches and listens even while speaking. In a company-run, one-minute study, 26 of 54 testers thought it human. Griffin-Lite is limited to select testers; broader results remain unknown.",
+      "headline": "Tavus Tests Lifelike Video-Call AI",
+      "key_fact": "26 of 54 testers thought it human",
+      "source": "tavus.io",
+      "url": "https://www.tavus.io/griffin"
+    },
+    {
+      "kind": "story",
+      "text": "Microsoft released a streaming transcription model that handles 60 languages and detects language continuously. It topped Artificial Analysis's streaming leaderboard. Microsoft also launched Voice and faster Flash models; Voice supports 23 languages. Developers now have more components for conversational agents.",
+      "headline": "Microsoft Launches Live Speech Models",
+      "key_fact": "Live transcription in 60 languages",
+      "source": "microsoft.ai",
+      "url": "https://microsoft.ai/news/our-first-streaming-transcription-model/"
+    },
+    {
+      "kind": "story",
+      "text": "Bloomberg's Mark Gurman says Apple is developing a home-security camera that describes activity in text instead of recording video. Its low-frame-rate sensor and on-device AI would flag events like someone entering a room. It's unannounced, so its capabilities remain unconfirmed.",
+      "headline": "Apple's Reported Camera Skips Video",
+      "key_fact": "Text descriptions instead of footage",
+      "source": "",
+      "url": "https://link.mail.beehiiv.com/ss/c/u001.DL04T5Gzv1AMR80B-C5NajTMsskrOK6ot7t_TUAO0akAgq0um9Hzu-e1SJ_jKwyEi5ypzOzVv_lQ5D2Q1dmz1Zh85Y4tjU_BltIxQjb0l6PARsTZMj1Qjp9O9rMEemkRS9-1TdNYriENNO7yTpTW_lLQ7lOwd3fNC47I_vwS0FvUsY9c0q5BwBbv1A0fiG0RpnU0ilmdHiCU54OiKEMLMkYs1xuGWQcnHiZ0f19w1V-j8GM97fQtKpqEJuf1yCH8_IkWXraYQ-ZZ3xloRTQJS8xNJyj4n5DdpGVD6fXZ7Ds/4uj/baIrp5oORJa4y0cnje2cuA/h6/h001.yYJFT3OlRGoGe_b9BaAH8hAvAN8A7xO9bS-ifdumu-U"
+    },
+    {
+      "kind": "story",
+      "text": "Bloomberg reports Anthropic is targeting a mid-November stock-market debut. Formal marketing could begin the week of November ninth, potentially putting shares on the market before Thanksgiving. That's a reported plan, not an announced date; watch for formal confirmation.",
+      "headline": "Anthropic Reportedly Eyes November IPO",
+      "key_fact": "Reported target: mid-November",
+      "source": "",
+      "url": "https://link.mail.beehiiv.com/ss/c/u001.26HABC69RFxgG0sCL9wUtUieCwTrPEBl3e9eV9N7oOqmBpLJ0TMDimQgnKQRxrsy5R6br4_ZlMWbMOfsHPo7mNxRyRAEYvFuuPaDX0nL64YF2B3IxHG6WvOZv7Z7W4pgjRLf428AS0cShlfsWEHgVdltK1S8mlYFxIPp_6jw6v6S_hD7rxffTcnw9B7wuNOFUZgE8dzV66qJZsx4KYBEngYsnzswEGEM41mxjgrRROrxs4T6BJy6eUleEPD1aU1f2OlTsHAzdk-2qcQM9mmG1lRilE9PhfdkoZnGGAmdbt5czHQk_GDmeAlB6q-GbJptlXIb1lAfmBBy1RFSlA3J-T7C7_AJ-YQ_GhteTdLoW7E/4uj/MklKGFKeTx6eeCObLNcvjQ/h30/h001.jBVdlQKTDURxeyezJPMW2DaHBz7igXCYiEUEMYAiLPA"
+    },
+    {
+      "kind": "story",
+      "text": "Cloudflare released Clef and Clef-flash, open-source models that return action choices with probabilities instead of free-form answers. They work with the Jev API and can run locally. That could help software route uncertain decisions to humans.",
+      "headline": "Cloudflare Opens Up Agent Decision Models",
+      "key_fact": "Action choices with probabilities",
+      "source": "blog.cloudflare.com",
+      "url": "https://blog.cloudflare.com/clef-decision-models/"
+    },
+    {
+      "kind": "story",
+      "text": "DeepSeek open-sourced six software modules for Huawei's Ascend AI chips, including compute and communication libraries and TileLang support. The tools give developers another way to run AI workloads on Huawei hardware, offering an alternative to Nvidia's CUDA ecosystem.",
+      "headline": "DeepSeek Releases Huawei Chip Tools",
+      "key_fact": "Six modules for Ascend chips",
+      "source": "thenextweb.com",
+      "url": "https://thenextweb.com/news/deepseek-huawei-ascend-tilelang-open-source-cuda"
+    },
+    {
+      "kind": "story",
+      "text": "Since October first, arXiv has limited each submitter to two submissions per calendar month; its cap of three active submissions remains. It says rising submissions are stretching volunteer moderators. The aim is fairer review time and a healthier research archive.",
+      "headline": "arXiv Sets Monthly Submission Cap",
+      "key_fact": "Two submissions per submitter monthly",
+      "source": "arXiv",
+      "url": "https://blog.arxiv.org/2026/10/01/updated-rate-limit-policy/"
+    },
+    {
+      "kind": "story",
+      "text": "Suno's new Speech feature generates spoken voices from scripts or descriptions, with optional AI background music. It's in public beta on web and mobile. For anyone making voiceovers, it puts narration and a soundtrack in one tool.",
+      "headline": "Suno Adds AI-Generated Speech",
+      "key_fact": "Voiceovers and optional background music",
+      "source": "The Verge",
+      "url": "https://www.theverge.com/ai-artificial-intelligence/1003925/suno-speech-ai-voice-feature-beta-availability"
+    },
+    {
+      "kind": "outro",
+      "text": "At the next family dinner, your nephew will explain AI to you. Subscribe before that happens. That's the news from the pond. See you tomorrow!",
+      "headline": "",
+      "key_fact": "",
+      "source": "",
+      "url": ""
+    }
+  ],
+  "stories": []
+}
