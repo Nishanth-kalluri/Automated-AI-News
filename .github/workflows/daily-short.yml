@@ -83,6 +83,8 @@ jobs:
           SHORTS_OPENAI_VOICE: ${{ vars.SHORTS_OPENAI_VOICE }}
           SHORTS_OPENAI_TTS_MODEL: ${{ vars.SHORTS_OPENAI_TTS_MODEL }}
           SHORTS_VOICE_LINEUP: ${{ inputs.voices }}
+          SHORTS_MUSIC: ${{ vars.SHORTS_MUSIC }}
+          SHORTS_MUSIC_VOLUME: ${{ vars.SHORTS_MUSIC_VOLUME }}
           SHORTS_UPLOADER: ${{ vars.SHORTS_UPLOADER || 'local' }}
           SHORTS_YOUTUBE_PRIVACY: ${{ vars.SHORTS_YOUTUBE_PRIVACY }}
           SHORTS_YOUTUBE_SIGNIN_DAYS: ${{ vars.SHORTS_YOUTUBE_SIGNIN_DAYS }}
@@ -115,9 +117,13 @@ jobs:
             output/*/*.json
             output/*/captions.ass
             output/*/upload.txt
+            output/*/thumbnail.png
             output/*/shadow/short.mp4
             output/*/shadow/*.json
             output/*/shadow/captions.ass
             output/*/voices/*.mp3
             output/*/voices/voices.txt
           if-no-files-found: ignore
+          # A private repository on GitHub Free has 500 MB for artifacts, and a day's download is about
+          # 8 MB: 30 days keeps well under it.
+          retention-days: 30

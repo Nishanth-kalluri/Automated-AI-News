@@ -348,7 +348,7 @@ def _stub_run(monkeypatch, tmp_path, candidates=None, llm=True):
     news = [_story(t, summary=SUMMARIES[t]) for t in TITLES]
     candidates = news if candidates is None else candidates
     rig = SimpleNamespace(news=news, fetches=[], notes=[], http=[], llms=[], uploads=[], uploaders=[], renders=[],
-                          http_before_shadow=None)
+                          music=[], http_before_shadow=None)
 
     def fetch(sources):
         rig.fetches.append(sources)
@@ -375,8 +375,9 @@ def _stub_run(monkeypatch, tmp_path, candidates=None, llm=True):
         rig.uploaders.append(cfg.uploader)
         return FakeYouTube(rig.uploads) if cfg.uploader == "youtube" else real_uploader(cfg)
 
-    def render(vo, cards, desk, host, out, preset):
+    def render(vo, cards, desk, host, out, preset, music=None, music_volume=0.0):
         rig.renders.append((out, preset))
+        rig.music.append(music)
         return out
 
     real_uploader = pipeline.build_uploader
@@ -440,7 +441,7 @@ def test_shadow_run_writes_its_folder_and_leaves_production_alone(monkeypatch, t
 def test_a_crash_inside_the_shadow_run_is_recorded_and_production_is_intact(monkeypatch, tmp_path):
     rig = _stub_run(monkeypatch, tmp_path)
 
-    def render(vo, cards, desk, host, out, preset):
+    def render(vo, cards, desk, host, out, preset, **kw):
         if out.parent.name == "shadow":
             raise RuntimeError("encoder crashed")
         return out
@@ -530,7 +531,7 @@ def test_no_shadow_offline_with_the_web_on_or_when_production_never_fetched(monk
 def test_an_interrupted_run_starts_no_shadow(monkeypatch, tmp_path):
     rig = _stub_run(monkeypatch, tmp_path)
 
-    def render(*args):
+    def render(*args, **kw):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(pipeline.composer, "render", render)

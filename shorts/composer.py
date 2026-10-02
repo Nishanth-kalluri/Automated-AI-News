@@ -1,6 +1,7 @@
 """Stage 8: put the layers on a timeline and render the final video with one ffmpeg call.
 
-Layers, bottom to top: segment backgrounds, the host, the desk, word-by-word captions.
+Layers, bottom to top: segment backgrounds, the host, the desk, word-by-word captions. The sound is
+the voice, with the day's music track (if any) looped quietly under it and ducked while the host talks.
 The timeline is written to timeline.json first so a different renderer (Remotion, a
 cloud editor) can consume the same description later.
 """
@@ -20,6 +21,8 @@ FPS = 30
 WORDS_PER_CAPTION = 3
 CAPTION_SIZE = 76
 CAPTION_MAX_W = 920  # rendered pixels; the frame is 1080 wide
+LOUDNESS = "loudnorm=I=-14:TP=-1.5:LRA=11"  # YouTube plays everything at about -14 LUFS
+MUSIC_FADE_IN, MUSIC_FADE_OUT = 1.0, 2.5  # seconds
 # libass draws a size-76 caption (outline included) about 0.85x as wide as Pillow measures
 # DejaVu Sans Bold at 76 px; measured on the offline sample run. Rounded up to stay safe.
 LIBASS_SCALE = 0.87
@@ -99,8 +102,22 @@ def background_concat(cards: list[Path], voice: Voiceover) -> str:
     return "".join(lines)
 
 
+def audio_graph(duration: float, music_volume: float) -> str:
+    """Voice (input 3) over the music (input 4): the music fades in and out and is pushed down further
+    whenever the voice is speaking, so the words stay clear and the pauses don't fall silent."""
+    fade_out = max(duration - MUSIC_FADE_OUT, 0)
+    return (
+        "[3:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[voice][key];"
+        f"[4:a]aformat=sample_rates=48000:channel_layouts=stereo,volume={music_volume:.3f},"
+        f"afade=t=in:d={MUSIC_FADE_IN},afade=t=out:st={fade_out:.3f}:d={MUSIC_FADE_OUT}[bed];"
+        "[bed][key]sidechaincompress=threshold=0.02:ratio=4:attack=20:release=600[ducked];"
+        f"[voice][ducked]amix=inputs=2:duration=first:normalize=0,{LOUDNESS}[a]"
+    )
+
+
 def render(voice: Voiceover, cards: list[Path], desk: Path, host: CharacterTrack,
-           out_path: Path, x264_preset: str = "medium") -> Path:
+           out_path: Path, x264_preset: str = "medium", music: Path | None = None,
+           music_volume: float = 0.15) -> Path:
     work = out_path.parent
     (work / "backgrounds.txt").write_text(background_concat(cards, voice))
     (work / "captions.ass").write_text(captions_ass(voice.words))
@@ -113,6 +130,7 @@ def render(voice: Voiceover, cards: list[Path], desk: Path, host: CharacterTrack
         "layers": ["backgrounds.txt", {"host": host.input_args, "x": host_x, "y": host_y},
                    desk.name, "captions.ass"],
         "audio": voice.audio_path.name,
+        "music": {"track": music.name, "volume": music_volume} if music else None,
     }
     (work / "timeline.json").write_text(json.dumps(timeline, indent=2))
 
@@ -123,15 +141,20 @@ def render(voice: Voiceover, cards: list[Path], desk: Path, host: CharacterTrack
         f"[v1][2:v]overlay=0:0[v2];"
         f"[v2]ass=captions.ass,format=yuv420p[v]"
     )
+    if music:  # looped, so a short track still covers the whole episode
+        sound = ["-stream_loop", "-1", "-i", str(music.resolve()),
+                 "-filter_complex", f"{graph};{audio_graph(voice.duration, music_volume)}", "-map", "[v]", "-map", "[a]"]
+    else:
+        sound = ["-filter_complex", graph, "-map", "[v]", "-map", "3:a", "-af", LOUDNESS]
     run_ffmpeg([
         "-f", "concat", "-safe", "0", "-i", "backgrounds.txt",
         *host.input_args,
         "-loop", "1", "-framerate", str(FPS), "-i", str(desk.resolve()),
         "-i", str(voice.audio_path.resolve()),
-        "-filter_complex", graph, "-map", "[v]", "-map", "3:a",
+        *sound,
         "-t", f"{voice.duration:.3f}", "-r", str(FPS),
         "-c:v", "libx264", "-preset", x264_preset, "-crf", "21",
-        "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
+        "-c:a", "aac", "-b:a", "160k", "-ar", "48000",
         "-movflags", "+faststart", str(out_path.resolve()),
     ], cwd=work)
     return out_path

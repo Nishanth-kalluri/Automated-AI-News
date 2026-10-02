@@ -43,7 +43,15 @@ TEMPLATE_BRIDGES = (
     ("Also ahead: {a}, and {b}.", "Also ahead: {a}.", "But we start with the big one."),
     ("Still to come: {a}, and {b}.", "Still to come: {a}.", "First up, the top story."),
 )
-TEMPLATE_INTRO_MAX = 22
+# The template intro's line after the greeting: what the episode covers, worded differently each day.
+TEMPLATE_SCOPES = (
+    "Let's dig into the AI news trending over the past day.",
+    "Here's what's buzzing in AI from the last 24 hours.",
+    "Let's dive into the past day's biggest AI news.",
+    "Here's the AI news making waves over the past day.",
+    "Let's paddle through the last 24 hours of AI news.",
+)
+TEMPLATE_INTRO_MAX = 32
 # Problems about the intro or outro only; they don't open the story segments for rewriting.
 FRAME_CODES = ("missing_intro", "missing_outro", "intro_problem", "outro_problem")
 # Problems only settle() fixes, by using the standard title or description.
@@ -54,16 +62,19 @@ WRITER_SYSTEM = """You write the script for a daily vertical YouTube Short of ab
 {persona}
 
 Format:
-- "intro": 14 to 22 words that read as one thought: greet, tease, hand over.
+- "intro": 20 to 30 words that read as one opening: greet, say what's coming, tease, hand over.
   Open with a fresh, playful hook of at most 8 words that greets the viewer as the host, with a quack or a
   duck word and your name or the show's, like "Quack quack, it's {host} on {show}!". It may carry the
-  episode's one duck joke. Keep it short, so the news starts within about three seconds.
-  Then, in about 14 words, give the most gripping point from stories 2 to 4, or what ties most stories
+  episode's one duck joke.
+  Then one short line, at most 10 words, saying you're digging into the AI news trending over the past day,
+  worded fresh each day, like "Let's dig into the AI news trending over the past day." or "Here's what's
+  buzzing in AI from the last 24 hours." Say "past day", "last 24 hours" or "today's" in it.
+  Then, in about 10 words, give the most gripping point from stories 2 to 4, or what ties most stories
   together, and hand over to story 1 in five words or fewer, for example "<tease> is coming up. First,
-  <story 1>." or "<what ties the day together>, from <tease> to <tease>, starting with <story 1>."
+  <story 1>." or "From <tease> to <tease>, starting with <story 1>."
   Story 1's segment starts right after the intro, so only name story 1: never say its facts, numbers or wording.
   Tension is good; exaggeration is not: keep "in tests", "plans to", "says" and the right company, and tell
-  a test, plan or claim as exactly that. With a single story, go straight from the greeting to it.
+  a test, plan or claim as exactly that. With a single story, go straight from that line to it.
   No questions, no hype, no warnings about missing out and no calls to action: the outro does that.
   Word the greeting and the hand-over differently every day: never open like one of the recent intros you are
   shown. Don't count the stories.
@@ -134,8 +145,9 @@ tests", "plans to", "says", "according to"), tells a test, plan or claim as some
 the wrong company. Under "intro_quality" list only these problems:
 - it says story 1's facts, numbers or wording, which story 1's segment says right after it (just naming story 1
   is fine);
-- its parts don't make one thought: a greeting followed by an unrelated fact, a list of fragments, or a question
-  the script never answers;
+- its parts don't make one opening: a greeting followed by an unrelated fact, a list of fragments, or a question
+  the script never answers (the greeting, a line saying it covers the past day's AI news, the tease and the
+  hand-over in that order are the intended shape);
 - its tease is generic and could air on any day, or promises something no segment delivers;
 - it doesn't lead into story 1;
 - it warns viewers about missing out or asks them to do anything (the outro does that).
@@ -337,8 +349,9 @@ class TemplateWriter:
 
     def intro(self, n: int = 0, headlines: Sequence[str] = (), *, first_text: str = "", first_names: str = "",
               material: str = "", banned: set[str] | tuple[str, ...] = ()) -> Segment:
-        """Today's greeting from the rotation (skipping any a recent episode opened with), a tease of the next
-        stories' headlines and a hand-over to the first story, which it never describes.
+        """Today's greeting from the rotation (skipping any a recent episode opened with), a line saying it
+        covers the past day's AI news, a tease of the next stories' headlines and a hand-over to the first
+        story, which it never describes.
 
         ``headlines`` are the stories' on-screen headlines in airing order; ``first_text`` is story 1's
         segment and ``first_names`` its headline and title, for the same checks the writer's intro gets.
@@ -356,16 +369,17 @@ class TemplateWriter:
                 continue
             usable.append(h)
         two, one, hand = TEMPLATE_BRIDGES[start % len(TEMPLATE_BRIDGES)]
+        scope = TEMPLATE_SCOPES[start % len(TEMPLATE_SCOPES)]
         options = []
         if len(usable) >= 2:
-            options.append(f"{greet} {two.format(a=usable[0], b=usable[1])} {hand}")
+            options.append(f"{greet} {scope} {two.format(a=usable[0], b=usable[1])} {hand}")
         if usable:
-            options.append(f"{greet} {one.format(a=usable[0])} {hand}")
+            options.append(f"{greet} {scope} {one.format(a=usable[0])} {hand}")
         for text in options:
             if (len(text.split()) <= TEMPLATE_INTRO_MAX
                     and not intro_shape_problems(text, self.host, self.show, first_text, first_names)):
                 return Segment(kind="intro", text=text)
-        return Segment(kind="intro", text=f"{greet} Let's get right to the top story.")
+        return Segment(kind="intro", text=f"{greet} {scope} First, the top story.")
 
     def intro_for(self, stories: list[Story], segments: Sequence[Segment], frame: str = "",
                   banned: set[str] | tuple[str, ...] = ()) -> Segment:

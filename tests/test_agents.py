@@ -296,7 +296,7 @@ def _stories():
     return [a, b]
 
 
-INTRO = "Quack, it's Host on Show! A faster chip is coming up. First, the lab's new agent."
+INTRO = "Quack, it's Host on Show! Here's the past day's AI news. A faster chip is coming up. First, the lab's new agent."
 
 
 def _script(a_text, b_text):
@@ -354,7 +354,8 @@ def test_intro_and_outro_are_checked_and_fixed_without_touching_stories():
     script = _script(GOOD_A, GOOD_B)
     script["intro"] = "A revolutionary day: the lab raised 400 billion dollars, plus 1 more story."
     flagged = {"intro": [], "outro": ["claims the show is on every night"], "segments": []}
-    revision = {"intro": "Quack, it's Host on Show! A chip that is 2 times faster is ahead. First, the lab's agent.",
+    revision = {"intro": "Quack, it's Host on Show! Here's the past day's AI news. A chip that is 2 times faster is "
+                         "ahead. First, the lab's agent.",
                 "outro": "",
                 "segments": [{"story": 1, "headline": "x", "key_fact": "x", "text": "must be ignored"}]}
     llm = ScriptedLLM(script, flagged, revision, NO_ISSUES)
@@ -465,7 +466,7 @@ def test_intro_may_use_the_show_name_and_date():
     assert [i.code for i in lint_episode(ep, [story]) if i.code == "intro_problem"] == ["intro_problem"]
     assert not [i for i in lint_episode(ep, [story], frame) if i.code == "intro_problem"]
     script = _script(GOOD_A, GOOD_B)
-    script["intro"] = "It's AI in 60 Seconds with Quackers, and 2 AI stories today."
+    script["intro"] = "It's AI in 60 Seconds with Quackers! Here's today's AI news, with 2 AI stories from the past day."
     llm = ScriptedLLM(script, NO_ISSUES)
     ep = CriticWriter(llm, llm, "AI in 60 Seconds", "Quackers").write(_stories())
     assert [c[0] for c in llm.calls] == ["writer", "critic"] and ep.segments[0].text == script["intro"]
@@ -527,7 +528,7 @@ def test_live_run_with_no_voice_fails_qa(monkeypatch, tmp_path):
               "Mistral releases coding model", "DeepMind robot learns to cook"]
     live = [_news(t) for t in titles]
     monkeypatch.setattr(pipeline, "fetch_all", lambda sources: live)
-    monkeypatch.setattr(pipeline.composer, "render", lambda vo, cards, desk, host, out, preset: out)
+    monkeypatch.setattr(pipeline.composer, "render", lambda vo, cards, desk, host, out, preset, **kw: out)
     monkeypatch.setattr(qa, "media_duration", lambda p: 120.0)
     monkeypatch.setattr(qa, "has_audio", lambda p: True)
     # live news and the template writer (SHORTS_ALLOW_NO_AI=on, or there is no episode without a model),

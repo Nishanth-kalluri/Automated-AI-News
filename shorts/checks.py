@@ -22,8 +22,12 @@ WORDS_PER_SECOND = 2.6  # same pace the silent voice uses
 SEGMENT_GAP = 0.3
 TARGET_MAX_SECONDS = 170  # leaves headroom under the 180 s Shorts limit
 HYPE_WORDS = ("revolutionary", "game-changer", "game changer", "mind-blowing", "mind blowing")
-INTRO_WORDS = (10, 26)  # the writer aims for 14-22: a short greeting, a tease, a hand-over to story 1
+INTRO_WORDS = (14, 34)  # the writer aims for 20-30: a greeting, the day's scope, a tease, a hand-over to story 1
 INTRO_GREET_WITHIN = 10  # the host's or the show's name comes in this many first words
+# The line after the greeting that says what the episode covers: the past day's AI news.
+INTRO_SCOPE = re.compile(r"\b(?:past|last)\s+(?:24|twenty[- ]four)\s+hours?\b|\b(?:past|last)\s+day(?:'s)?\b"
+                         r"|\btoday['\u2019]s\b|\bin\s+AI\s+today\b", re.I)
+INTRO_SCOPE_TOPIC = re.compile(r"\bAI\b|\bnews\b", re.I)  # in the same sentence as the scope words
 TITLE_MAX = 91  # the uploader appends " #Shorts" and YouTube allows 100 characters
 
 _URL_RE = re.compile(r"https?://[^\s)>\]\"'<]+")
@@ -333,7 +337,8 @@ def _bare(words: list[str]) -> str:
 def intro_shape_problems(text: str, host: str, show: str, first_text: str = "", first_names: str = "",
                          other_text: str = "") -> list[str]:
     """Whether the intro works as one opening: short, greets the viewer as the host or names the show
-    early, doesn't end on a question, and leaves story 1's facts to story 1's segment, which follows it.
+    early, says it covers the past day's AI news, doesn't end on a question, and leaves story 1's facts to
+    story 1's segment, which follows it.
 
     ``first_text`` is story 1's segment; ``first_names`` its headline and title, whose words the intro
     may use to name it; ``other_text`` the other stories' segments, whose phrases a tease may share.
@@ -341,13 +346,16 @@ def intro_shape_problems(text: str, host: str, show: str, first_text: str = "", 
     problems = []
     n = len(text.split())
     if n > INTRO_WORDS[1]:
-        problems.append(f"is {n} words; keep it to 14-22")
+        problems.append(f"is {n} words; keep it to 20-30")
     elif n < INTRO_WORDS[0]:
         problems.append(f"is only {n} words; greet the viewer, then lead into the news")
     names = [x for x in (host, show) if _words(x)]
     head = _bare(_words(text)[:INTRO_GREET_WITHIN])
     if names and not any(_bare(_words(x)) in head for x in names):
         problems.append(f"doesn't greet the viewer as {host} or name {show} in its first words")
+    if not any(INTRO_SCOPE.search(s) and INTRO_SCOPE_TOPIC.search(s) for s in _sentences(text)):
+        problems.append('doesn\'t say what the episode covers; after the greeting, add a short line like "Let\'s '
+                        'dig into the AI news trending over the past day"')
     sentences = _sentences(text)
     if sentences and sentences[-1].rstrip().rstrip("\"'\u201d").endswith("?"):
         problems.append("ends on a question; end by handing over to the first story")
@@ -388,7 +396,8 @@ def lint_episode(episode: Episode, stories: list[Story], frame: str = "", *,
         if seg.kind not in ("intro", "outro") or not seg.text.strip():
             continue
         problems = _speech_problems(seg.text, banned, outro=seg.kind == "outro")
-        missing = unsupported_numbers(seg.text, everything)
+        # "the last 24 hours" in the intro says what the episode covers, not a fact from the stories
+        missing = unsupported_numbers(INTRO_SCOPE.sub(" ", seg.text) if seg.kind == "intro" else seg.text, everything)
         if missing:
             problems.append(f"uses {', '.join(missing)}, which is not in the story material")
         if seg.kind == "intro":

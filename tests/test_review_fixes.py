@@ -440,7 +440,8 @@ NO_ISSUES = {"intro": [], "outro": [], "segments": []}
 NO_CHANGE = {"intro": "", "outro": "", "segments": []}
 
 
-def _script(*texts, intro="Quack, it's Quackers on Duck Desk! A faster chip is coming up. First, a lab agent for trips."):
+def _script(*texts, intro="Quack, it's Quackers on Duck Desk! Here's the past day's AI news. A faster chip is coming up. "
+                          "First, a lab agent for trips."):
     heads = [("Lab ships agent", "3 steps"), ("Chip is faster", "2x faster"), ("GPT-6 feels lazy", "")]
     return {"title": "AI today", "description": "Today's stories.", "tags": ["ai"], "intro": intro,
             "segments": [{"headline": h, "key_fact": k, "text": t} for (h, k), t in zip(heads, texts)],
@@ -477,7 +478,8 @@ def test_draft_prompt_lists_the_recent_intros_to_avoid():
 def test_intro_opening_like_a_recent_episode_goes_back_for_a_fresh_hook():
     recent = ["Quack quack, it's Quackers on Duck Desk! Big news from OpenAI today."]
     stale = _script(GOOD_A, GOOD_B, intro="Quack quack, it's Quackers on Duck Desk! A lab agent now books trips.")
-    fresh = "Splash! Quackers here with Duck Desk. A faster chip is ahead, but first, a lab agent for trips."
+    fresh = ("Splash! Quackers here with Duck Desk. Here's the past day's AI news. A faster chip is ahead, but "
+             "first, a lab agent for trips.")
     llm = ScriptedLLM(stale, NO_ISSUES, dict(NO_CHANGE, intro=fresh), NO_ISSUES)
     ep = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=1, recent_intros=recent).write(_stories())
     assert llm.stages == ["writer", "critic", "writer-repair-1", "critic"]
@@ -627,7 +629,8 @@ def test_a_story_that_still_reads_source_talk_as_a_template_is_left_out():
     stories = [*_stories(), _lazy_story()]
     forum = ("Over on Reddit, users say GPT-6 now gives shorter answers than GPT-5 did. OpenAI says it is looking "
              "into the reports and will share an update soon. People notice quickly when a model changes.")
-    teaser = "Quack, it's Quackers on Duck Desk! GPT-6 may feel lazy, plus a faster chip. First, a travel agent."
+    teaser = ("Quack, it's Quackers on Duck Desk! Here's the past day's AI news. GPT-6 may feel lazy, plus a faster "
+              "chip. First, a travel agent.")
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B, forum, intro=teaser), NO_ISSUES)
     writer = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0)
     ep = writer.write(stories)
@@ -639,7 +642,8 @@ def test_a_story_that_still_reads_source_talk_as_a_template_is_left_out():
     assert {"part": "intro", "why": "teased a story that was left out"} in writer.report["fallbacks"]
     assert ep.segments[-1].text == DEFAULT_OUTRO
     # an intro that didn't tease the dropped story stays
-    other = "Quack, it's Quackers on Duck Desk! A faster chip is ahead, but first, a travel agent for whole trips."
+    other = ("Quack, it's Quackers on Duck Desk! Here's the past day's AI news. A faster chip is ahead, but first, "
+             "a travel agent for whole trips.")
     llm = ScriptedLLM(_script(GOOD_A, GOOD_B, forum, intro=other), NO_ISSUES)
     ep = CriticWriter(llm, llm, "Duck Desk", "Quackers", max_repairs=0).write(stories)
     assert ep.segments[0].text == other and len(ep.story_segments) == 2
