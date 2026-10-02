@@ -25,6 +25,7 @@ TAGS_MAX_CHARS = 450
 _URL = re.compile(r"https?://\S+")
 RETRY_STATUSES = (429, 500, 502, 503, 504)  # YouTube busy or down for a moment: resume the upload
 UPLOAD_RETRIES = 5
+THUMBNAIL = "thumbnail.png"  # drawn next to the video (shorts/thumbnail.py)
 RENEW_NOTICE_DAYS = 2  # the email starts reminding this many days before the sign-in ends
 RENEW_STEPS = ("On your PC, open PowerShell in the Automated-AI-News folder, run "
                ".venv\\Scripts\\python -m shorts youtube-auth client_secret.json (on a Mac: "
@@ -99,12 +100,14 @@ class LocalUploader:
 
 def write_metadata(video: Path, episode: Episode) -> Path:
     """upload.json next to the video, and upload.txt with the same title, description and tags ready to
-    paste into YouTube Studio for a hand upload. The YouTube uploader writes them too."""
+    paste into YouTube Studio for a hand upload (and the thumbnail to pick, if one was drawn). The YouTube
+    uploader writes them too."""
     meta = upload_metadata(episode)
     path = video.with_name("upload.json")
     path.write_text(json.dumps({"file": video.name, **meta}, indent=2, ensure_ascii=False), encoding="utf-8")
+    thumb = f"\nTHUMBNAIL\n{THUMBNAIL}, in the same folder\n" if video.with_name(THUMBNAIL).exists() else ""
     video.with_name("upload.txt").write_text(
-        f"TITLE\n{meta['title']}\n\nDESCRIPTION\n{meta['description']}\n\nTAGS\n{', '.join(meta['tags'])}\n",
+        f"TITLE\n{meta['title']}\n\nDESCRIPTION\n{meta['description']}\n\nTAGS\n{', '.join(meta['tags'])}\n{thumb}",
         encoding="utf-8")
     return path
 
@@ -190,7 +193,24 @@ class YouTubeUploader:
                     raise
                 log.warning("      upload interrupted (%s); resuming", exc)
                 time.sleep(5 * drops)
-        return UploadResult(self.name, f"https://youtube.com/shorts/{resp['id']}")
+        note = self.set_thumbnail(yt, resp["id"], video.with_name(THUMBNAIL))
+        return UploadResult(self.name, f"https://youtube.com/shorts/{resp['id']}", note)
+
+    def set_thumbnail(self, yt, video_id: str, image: Path) -> str:
+        """Put the episode's thumbnail on the uploaded video. Returns "" or what to tell the user: the
+        video is already up, so a refused thumbnail never fails the upload."""
+        if not image.exists():
+            return ""
+        from googleapiclient.http import MediaFileUpload
+
+        try:
+            yt.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(str(image), mimetype="image/png")
+                                ).execute(num_retries=2)
+        except Exception as exc:
+            log.warning("      YouTube didn't take the thumbnail (%s)", exc)
+            return thumbnail_hint(exc)
+        log.info("      thumbnail set")
+        return ""
 
 
 def _http_errors() -> type[Exception]:
@@ -208,6 +228,16 @@ def build_uploader(cfg: Config) -> Uploader:
     if cfg.uploader != "local":
         raise ValueError(f"Unknown uploader {cfg.uploader!r}")
     return LocalUploader()
+
+
+def thumbnail_hint(exc: Exception) -> str:
+    """Why YouTube refused the thumbnail, and what to do about it, for the email."""
+    if getattr(getattr(exc, "resp", None), "status", None) == 403:
+        return ("YouTube didn't take the thumbnail: the channel can't use custom thumbnails until it is "
+                "verified. Verify it once with a phone code at https://www.youtube.com/verify and later "
+                f"uploads get theirs. For this one, add {THUMBNAIL} from the run's download in YouTube Studio.")
+    return (f"YouTube didn't take the thumbnail ({type(exc).__name__}: {str(exc)[:200]}). The video is up; "
+            f"{THUMBNAIL} is in the run's download to add in YouTube Studio.")
 
 
 def upload_hint(exc: Exception) -> str:

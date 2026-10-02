@@ -2,7 +2,7 @@
 
     01-candidates.json  01-candidates.full.json  02-picks.json  02-research.json  02-coverage.json
     03-episode.json  03-review.json  audio/  host/  cards/  timeline.json  captions.ass  short.mp4
-    qa.json  upload.json  upload.txt  cost.json  shadow/
+    qa.json  thumbnail.png  upload.json  upload.txt  cost.json  shadow/
 
 With an LLM configured and SHORTS_AGENTS on (the default), the editor and writer run as agents
 with check-and-repair loops; without one, every stage uses its no-key fallback. SHORTS_WEB=on
@@ -27,12 +27,14 @@ from .content import banned_names, description_problem
 from .coverage import Coverage
 from .llm import SpendLedger, Usage, build_llm, with_model
 from .models import Episode, Story
+from .music import pick_track
 from .notify import build_notifier, notify, run_url
 from .outro import OutroLog
 from .qa import QAReport, check
 from .research import AgentResearcher, build_researcher, research, swap_failing
 from .selection import HeuristicEditor, SeenStore, build_editor, drop_duplicates, pick_with_fallback, settle
 from .sources import build_sources, fetch_all
+from .thumbnail import save_thumbnail
 from .upload import LocalUploader, Uploader, YouTubeSignInError, build_uploader, renew_reminder, upload_hint
 from .visuals import StoryCards
 from .voice import build_voice, lineup, narrate, parse_lineup
@@ -263,9 +265,23 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     cards = StoryCards(cfg.show_name)
     backgrounds = cards.render(episode, run_dir / "cards")
     desk = cards.desk(run_dir / "cards" / "desk.png")
+    save_thumbnail(episode, cfg.show_name, run_dir / "thumbnail.png")  # set on the upload; beside short.mp4
 
     log.info("[8/9] rendering the video")
-    video = composer.render(vo, backgrounds, desk, host, run_dir / "short.mp4", cfg.x264_preset)
+    track, music = pick_track(cfg.music_dir), ""
+    if track:
+        log.info("      music: %s", track.name)
+        music = f", music: {track.stem}"
+    try:
+        video = composer.render(vo, backgrounds, desk, host, run_dir / "short.mp4", cfg.x264_preset,
+                                music=track, music_volume=cfg.music_volume)
+    except Exception as exc:
+        if not track:
+            raise
+        # A track ffmpeg can't read mustn't cost the day's episode.
+        log.warning("      the render with %s failed (%s); rendering without music", track.name, exc)
+        music = f", no music ({track.name} couldn't be played)"
+        video = composer.render(vo, backgrounds, desk, host, run_dir / "short.mp4", cfg.x264_preset)
     report = rec.qa = check(video, episode, min_n, vo, allow_sample=offline)
     _dump(run_dir / "qa.json", asdict(report))
     for w in report.warnings:
@@ -304,12 +320,14 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
                   "They're in the run's download (episode.zip, voices folder), with voices.txt saying how to pick one.")
     headlines = "\n".join(f"{i}. {s.headline}  {s.url}" for i, s in enumerate(episode.story_segments, 1))
     where = _where(cfg, result, upload, upload_problem)
+    if result.note:
+        where += f"\n\n{result.note}"
     if renew:
         where += f"\n\n{renew}"
     flag = ", NOT uploaded" if upload_problem else ", renew the YouTube sign-in" if renew else ""
     notify(build_notifier(cfg),
            f"New episode ready{flag}: {episode.title}",
-           f"{where}\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
+           f"{where}\n\nLength: {report.duration:.0f}s{music}\n\n{headlines}\n\n"
            f"Cost: ${usage.total_usd:.2f} (${usage.month_spent_usd + usage.total_usd:.2f} this month); "
            f"Tavily {credits.run_used} credits ({credits.this_month()}/{cfg.tavily_monthly_credits} this month)\n"
            f"Warnings: {'; '.join(report.warnings) or 'none'}{voices}")

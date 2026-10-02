@@ -115,7 +115,7 @@ Each run writes `output/<timestamp>/`:
 | Script | writer agent + critic (`SHORTS_WRITER_MODEL`, `SHORTS_CHECKER_MODEL`), persona in `shorts/persona.md` | LLM key | template line per failing segment | LangGraph newsroom with approval |
 | Voice | edge-tts `en-US-AnaNeural` at +18% (free), or OpenAI voices (`SHORTS_VOICE=openai`); script trimmed if the audio runs past 170 s | internet (OpenAI: `OPENAI_API_KEY`) | silence, which fails QA | ElevenLabs designed voice |
 | Host | puppet duck, bill moves with the voice loudness | – | – | Kling AI Avatar (`SHORTS_ANIMATOR`) |
-| Render | cards + duck + desk + karaoke captions, one ffmpeg call | – | – | Remotion |
+| Render | cards + duck + desk + karaoke captions over the voice and the day's music track, one ffmpeg call; plus `thumbnail.png` | – | no music when `assets/music/` has no tracks | Remotion |
 | Upload | `local` (metadata only) or `youtube` (private until the API audit, marked synthetic) | YouTube OAuth secrets | local, when YouTube refuses the sign-in or the upload | |
 | Notify | email from the AgentMail inbox | `SHORTS_NOTIFY_EMAIL` | log line | Telegram approve button |
 
@@ -151,6 +151,7 @@ In the repository settings, under **Secrets and variables → Actions**, add:
 | `SHORTS_STORIES_PER_VIDEO`, `SHORTS_MIN_STORIES` | variables | optional, default `8` and `4` |
 | `SHORTS_SOURCES` | variable | optional, default `newsletter,rss` |
 | `SHORTS_VOICE`, `SHORTS_EDGE_VOICE`, `SHORTS_EDGE_RATE`, `SHORTS_OPENAI_VOICE`, `SHORTS_OPENAI_TTS_MODEL` | variables | optional; see "Choosing a voice" |
+| `SHORTS_MUSIC`, `SHORTS_MUSIC_VOLUME` | variables | optional, `off` for no music; its level from 0 to 1 (default `0.15`); see "Background music" |
 | `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | secrets | see below |
 
 ## Choosing a voice
@@ -162,6 +163,19 @@ each voice, and the run's download (`episode.zip`) has one MP3 per voice in `voi
 `voices.txt` with the variables to set for each. The OpenAI voices cost a few cents per
 comparison run. Locally: `python -m shorts voices --voices all` reads the last episode's script
 (`state/last_episode.json`) or `--script output/<run>/03-episode.json`.
+
+## Background music
+
+Put a few tracks in `assets/music/` (see the README there): each episode plays the next one,
+looped quietly under the voice and pushed down further while the host talks. With no tracks,
+episodes have the voice only. The episode email names the day's track.
+
+## Thumbnail
+
+Each run draws `thumbnail.png` next to the video: the host at the desk under the top story's
+headline, with the date. The YouTube uploader sets it on the upload; YouTube only takes custom
+thumbnails from a channel verified once with a phone code at https://www.youtube.com/verify, and
+until then the email says so and the video still uploads. For a hand upload, `upload.txt` points to it.
 
 ## Trying web research: the shadow week
 

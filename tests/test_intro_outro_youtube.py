@@ -16,8 +16,8 @@ from shorts.models import Episode, Segment, UploadResult
 from shorts.outro import SIGN_OFF, SUBSCRIBE_LINES, OutroLog, outro_text
 from shorts.upload import (LocalUploader, YouTubeSignInError, YouTubeUploader, upload_hint, upload_metadata,
                            youtube_description, youtube_tags, youtube_title)
-from shorts.writer import (CRITIC_SYSTEM, REVIEW_SCHEMA, TEMPLATE_HOOKS, WRITER_SYSTEM, CriticWriter, LLMWriter,
-                           TemplateWriter, description_footer)
+from shorts.writer import (CRITIC_SYSTEM, REVIEW_SCHEMA, TEMPLATE_HOOKS, TEMPLATE_INTRO_MAX, TEMPLATE_SCOPES,
+                           WRITER_SYSTEM, CriticWriter, LLMWriter, TemplateWriter, description_footer)
 from tests.test_agents import ScriptedLLM, _story
 from tests.test_shadow import _stub_run
 
@@ -30,13 +30,16 @@ DOTS_HEADLINE = "OpenAI Introduces Always-On Dots"
 AIRED = "Quack! OpenAI’s new Dots can work toward your goals in the background. What can they actually do?"
 AIRED_2 = "Quack, AI now handles 26 percent of Anthropic’s research work. What happens if that keeps growing?"
 GOOD_INTROS = [
-    "Quack quack, it's Quackers on Duck Desk! Later, an OpenAI model breaks its rules in some simulated tests. "
-    "First, meet Dots.",
-    "Waddle in, it's Quackers! OpenAI had a packed day, from a cheaper GPT to a leaky sandbox, starting with Dots.",
-    "Quack! Quackers here on Duck Desk. A cheaper GPT and a sandbox slip are ahead, but first, OpenAI's always-on "
-    "Dots.",
-    "Duck Desk is back, with Quackers! A cheaper GPT is coming up, but first, OpenAI's new always-on Dots agents.",
-    "Quack! It's Quackers on Duck Desk. OpenAI Introduces Always-On Dots, and a cheaper GPT follows.",
+    "Quack quack, it's Quackers on Duck Desk! Let's dig into the AI news trending over the past day. Later, an "
+    "OpenAI model breaks its rules in some simulated tests. First, meet Dots.",
+    "Waddle in, it's Quackers! Here's the last 24 hours of AI news. OpenAI had a packed day, from a cheaper GPT to "
+    "a leaky sandbox, starting with Dots.",
+    "Quack! Quackers here on Duck Desk. Today's AI news is a busy one. A cheaper GPT and a sandbox slip are ahead, "
+    "but first, OpenAI's always-on Dots.",
+    "Duck Desk is back, with Quackers! Let's dive into the past day's AI news. A cheaper GPT is coming up, but "
+    "first, OpenAI's new always-on Dots agents.",
+    "Quack! It's Quackers on Duck Desk. Here's what's buzzing in AI from the last 24 hours. OpenAI Introduces "
+    "Always-On Dots, and a cheaper GPT follows.",
 ]
 
 
@@ -60,13 +63,44 @@ def test_greet_tease_hand_over_intros_pass(intro):
     assert _shape(intro) == []
 
 
+@pytest.mark.parametrize("intro", [
+    "Quack quack, it's Quackers on Duck Desk! Later, an OpenAI model breaks its rules in some simulated tests. "
+    "First, meet Dots.",  # aired before the scope line: greets, teases, hands over, but never says what's coming
+    "Quack quack, it's Quackers on Duck Desk! Today's top story is a big one, and a cheaper GPT follows it. "
+    "First, meet Dots.",  # "today's" alone isn't about the day's AI news
+])
+def test_an_intro_must_say_it_covers_the_past_days_ai_news(intro):
+    problems = _shape(intro)
+    assert len(problems) == 1 and problems[0].startswith("doesn't say what the episode covers")
+    assert "Let's dig into the AI news trending over the past day" in problems[0]
+
+
+def test_the_last_24_hours_is_not_a_number_the_stories_must_back():
+    story = _story("OpenAI Introduces Always-On Dots", summary=DOTS)
+    story.headline = story.title
+
+    def intro_issues(intro):
+        ep = Episode(title="t", description="d", tags=[], stories=[story],
+                     segments=[Segment("intro", intro), Segment("story", DOTS, DOTS_HEADLINE),
+                               Segment("outro", DEFAULT_OUTRO)])
+        return [i.detail for i in lint_episode(ep, [story], "Duck Desk Quackers", host=HOST, show=SHOW)
+                if i.code == "intro_problem"]
+
+    assert intro_issues("Quack! It's Quackers on Duck Desk. Here's what's buzzing in AI from the last 24 hours. "
+                        "First, OpenAI's Dots.") == []
+    issues = intro_issues("Quack! It's Quackers on Duck Desk. Here's the AI news of the last 24 hours, and OpenAI's "
+                          "24 billion dollar day. First, Dots.")
+    assert len(issues) == 1 and "uses 24 billion, which is not in the story material" in issues[0]
+
+
 def test_intro_length_bounds_and_questions_inside_are_fine():
-    long = "Quack quack, it's Quackers on Duck Desk! " + "OpenAI shipped agents, models, sandboxes and plugins, " * 3
-    assert any("keep it to 14-22" in p for p in _shape(long))
+    long = "Quack quack, it's Quackers on Duck Desk! " + "OpenAI shipped agents, models, sandboxes and plugins, " * 5
+    assert any("keep it to 20-30" in p for p in _shape(long))
     assert any(f"only {len('Quack, Quackers here.'.split())} words" in p for p in _shape("Quack, Quackers here."))
-    assert INTRO_WORDS == (10, 26)
+    assert INTRO_WORDS == (14, 34)
     # a question is fine when the intro doesn't end on it
-    assert _shape("Quack, it's Quackers on Duck Desk! Cheaper GPT? It's coming up. First, OpenAI's Dots.") == []
+    assert _shape("Quack, it's Quackers on Duck Desk! Here's the past day's AI news. Cheaper GPT? It's coming up. "
+                  "First, OpenAI's Dots.") == []
     assert any("question" in p for p in _shape("Quack, it's Quackers on Duck Desk! Ready for OpenAI's “Dots?”"))
 
 
@@ -91,7 +125,8 @@ def test_lint_runs_the_shape_checks_only_with_the_host_or_show():
 
 def test_the_writer_prompt_asks_for_greet_tease_hand_over_with_the_real_names():
     system = LLMWriter(ScriptedLLM(), SHOW, HOST).system(8)
-    assert "greet, tease, hand over" in system and "it's Quackers on Duck Desk!" in system
+    assert "greet, say what's coming, tease, hand over" in system and "it's Quackers on Duck Desk!" in system
+    assert "Let's dig into the AI news trending over the past day." in system
     assert "never say its facts, numbers or wording" in system and "No questions" in system
     assert "{host}" not in system and "{show}" not in system
     assert "fresh, playful hook" in WRITER_SYSTEM and "Don't count the stories" in WRITER_SYSTEM
@@ -135,7 +170,8 @@ def test_the_template_intro_passes_its_own_checks_every_day(monkeypatch, days):
     _Day.today_value = date(2026, 9, 29) + timedelta(days=days)
     text = TemplateWriter(SHOW, HOST).intro(4, HEADLINES, first_text=DOTS, first_names=DOTS_HEADLINE,
                                             material=_material()).text
-    assert _shape(text) == [] and len(text.split()) <= 22
+    assert _shape(text) == [] and len(text.split()) <= TEMPLATE_INTRO_MAX
+    assert any(scope in text for scope in TEMPLATE_SCOPES)
     assert "Dots" not in text  # never describes story 1
     assert text.split("!")[0].split(".")[0] in {h.format(host=HOST, show=SHOW).split("!")[0].split(".")[0]
                                                 for h in TEMPLATE_HOOKS}
@@ -148,7 +184,7 @@ def test_the_template_intro_skips_headlines_it_cannot_say(monkeypatch):
     t = TemplateWriter(SHOW, HOST)
     kw = dict(first_text=DOTS, first_names=DOTS_HEADLINE, material=_material())
     one = t.intro(1, HEADLINES[:1], **kw).text
-    assert one.endswith("Let's get right to the top story.") and _shape(one) == []
+    assert one.endswith("First, the top story.") and _shape(one) == []
     odd = t.intro(3, [HEADLINES[0], "Is GPT-7 Coming Next Month?", "The Rundown Says Codex Wins",
                       "An Extremely Long Headline That Goes On And On Forever Here", "OpenAI Raises 90 Billion"],
                   **kw).text
@@ -542,17 +578,22 @@ def test_client_ids_come_from_the_downloaded_json(tmp_path):
 # --- review fixes: greetings with possessives, stock phrases, story 1 dropped, rewrites, retries ---
 
 def test_greetings_with_a_possessive_or_contraction_count():
-    for intro in ("Quack, Duck Desk's on the air! A cheaper GPT is coming up. First, OpenAI's Dots.",
-                  "Duck Desk’s back with the pond news! A cheaper GPT is ahead, but first, OpenAI's Dots.",
-                  "Quackers'll walk you through it! A cheaper GPT is ahead, but first, OpenAI's Dots."):
+    for intro in ("Quack, Duck Desk's on the air! Here's the past day's AI news. A cheaper GPT is coming up. "
+                  "First, OpenAI's Dots.",
+                  "Duck Desk’s back with the pond news! Here's today's AI news. A cheaper GPT is ahead, but first, "
+                  "OpenAI's Dots.",
+                  "Quackers'll walk you through it! Here's the last day's AI news. A cheaper GPT is ahead, but "
+                  "first, OpenAI's Dots."):
         assert _shape(intro) == [], intro
-    assert any("greet" in p for p in _shape("Quack! Desk news today, a cheaper GPT is ahead. First, OpenAI's Dots."))
+    assert any("greet" in p for p in _shape("Quack! Desk news today, a cheaper GPT is ahead. Here's the past day's AI "
+                                            "news. First, OpenAI's Dots."))
 
 
 def test_a_stock_phrase_another_story_shares_is_not_a_repeat_of_story_1():
     first = "Google made Gemini 3 Flash the default in its app, and it rolls out in the coming weeks to everyone."
     other = "Microsoft says Copilot's memory rolls out in the coming weeks for Plus and Pro users."
-    intro = "Quack! Quackers here on Duck Desk. Copilot's memory rolls out in the coming weeks. First, Gemini."
+    intro = ("Quack! Quackers here on Duck Desk. Here's the past day's AI news. Copilot's memory rolls out in the "
+             "coming weeks. First, Gemini.")
     assert any("repeats the first story" in p for p in intro_shape_problems(intro, HOST, SHOW, first, "Gemini"))
     assert intro_shape_problems(intro, HOST, SHOW, first, "Gemini", other) == []
 

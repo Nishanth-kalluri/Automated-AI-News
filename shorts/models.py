@@ -81,3 +81,4 @@ class Voiceover:
 class UploadResult:
     uploader: str
     location: str
+    note: str = ""  # something the email should say, such as a thumbnail YouTube refused

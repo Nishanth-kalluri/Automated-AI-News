@@ -51,6 +51,14 @@ def _privacy(value: str) -> str:
     return value
 
 
+def _volume(value: str) -> float:
+    """SHORTS_MUSIC_VOLUME, checked when the run starts: 0.15 is quiet, 1 is as loud as the track."""
+    volume = float(value)
+    if not 0 <= volume <= 1:
+        raise ValueError(f"SHORTS_MUSIC_VOLUME must be between 0 and 1, not {value!r}")
+    return volume
+
+
 def _list(name: str, default: list[str]) -> list[str]:
     raw = _env(name)
     return [x.strip() for x in raw.split(",") if x.strip()] if raw else list(default)
@@ -99,6 +107,9 @@ class Config:
     # Extra voices to read the finished script with, for comparing voices ("all" for the standard set).
     voice_lineup: list[str]
     animator: str
+    # Background music: a folder of tracks, one a day, quiet under the voice. None (SHORTS_MUSIC=off): voice only.
+    music_dir: Path | None
+    music_volume: float  # the music's level while nobody speaks, 0 to 1; it drops further under the voice
     x264_preset: str
     uploader: str
     youtube_privacy: str
@@ -153,6 +164,8 @@ class Config:
             openai_tts_instructions=_env("SHORTS_OPENAI_TTS_INSTRUCTIONS", DEFAULT_OPENAI_TTS_INSTRUCTIONS),
             voice_lineup=_list("SHORTS_VOICE_LINEUP", []),
             animator=_env("SHORTS_ANIMATOR", "puppet"),
+            music_dir=Path(_env("SHORTS_MUSIC_DIR", "assets/music")) if _on("SHORTS_MUSIC", "on") else None,
+            music_volume=_volume(_env("SHORTS_MUSIC_VOLUME", "0.15")),
             x264_preset=_env("SHORTS_X264_PRESET", "medium"),
             uploader=_env("SHORTS_UPLOADER", "local").lower(),
             youtube_privacy=_privacy(_env("SHORTS_YOUTUBE_PRIVACY", "private")),
