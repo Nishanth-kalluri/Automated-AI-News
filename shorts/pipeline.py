@@ -79,8 +79,14 @@ def _story_rows(stories: list[Story], with_body: bool = False) -> list[dict]:
 def _cost(usage: Usage, ledger: SpendLedger, cfg: Config, credits: TavilyCredits, tavily_run: int) -> dict:
     return {"usd": round(usage.total_usd, 4), "run_cap_usd": cfg.budget_usd,
             "month_usd": round(ledger.this_month(), 4), "month_cap_usd": cfg.monthly_budget_usd,
-            "llm_calls": usage.calls, "tavily_credits_run": tavily_run,
+            "by_stage": usage.by_stage(), "llm_calls": usage.calls, "tavily_credits_run": tavily_run,
             "tavily_credits_month": credits.this_month(), "tavily_month_cap": cfg.tavily_monthly_credits}
+
+
+def _stage_costs(usage: Usage) -> str:
+    """ " (editor $0.21, research $0.04, writer $0.12)" for the email; "" without LLM calls."""
+    parts = [f"{name} ${row['usd']:.2f}" for name, row in usage.by_stage().items()]
+    return f" ({', '.join(parts)})" if parts else ""
 
 
 def run(cfg: Config, *, upload: bool = False) -> Path:
@@ -105,6 +111,8 @@ def run(cfg: Config, *, upload: bool = False) -> Path:
     finally:
         live.tavily_credits = credits.run_used
         _dump(run_dir / "cost.json", _cost(usage, ledger, cfg, credits, credits.run_used))
+        for line in usage.stage_lines():
+            log.info("cost: %s", line)
         if finished and cfg.shadow and not cfg.web and live.candidates and cfg.sources != ["sample"]:
             run_shadow(cfg, run_dir / "shadow", ledger, credits, live)
 
@@ -310,7 +318,8 @@ def _run(cfg: Config, run_dir: Path, usage: Usage, upload: bool, credits: Tavily
     notify(build_notifier(cfg),
            f"New episode ready{flag}: {episode.title}",
            f"{where}\n\nLength: {report.duration:.0f}s\n\n{headlines}\n\n"
-           f"Cost: ${usage.total_usd:.2f} (${usage.month_spent_usd + usage.total_usd:.2f} this month); "
+           f"Cost: ${usage.total_usd:.2f}{_stage_costs(usage)} (${usage.month_spent_usd + usage.total_usd:.2f} this "
+           "month); "
            f"Tavily {credits.run_used} credits ({credits.this_month()}/{cfg.tavily_monthly_credits} this month)\n"
            f"Warnings: {'; '.join(report.warnings) or 'none'}{voices}")
     log.info("done: %s", video)

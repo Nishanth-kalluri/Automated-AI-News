@@ -61,6 +61,11 @@ def price(model: str) -> tuple[float, float, float]:
     return fallback
 
 
+def stage_name(stage: str) -> str:
+    """The stage a call belongs to: "editor-repair-1" is the editor's, "research-3" the researchers'."""
+    return stage.split("-", 1)[0]
+
+
 def call_estimate(model: str, input_tokens: int, output_tokens: int) -> float:
     p_in, _, p_out = price(model)
     return (input_tokens * p_in + output_tokens * p_out) / 1e6
@@ -92,6 +97,32 @@ class Usage:
     def total_usd(self) -> float:
         with self._lock:
             return sum(c["usd"] for c in self.calls)
+
+    def stage_usd(self, stage: str) -> float:
+        """Dollars spent by a stage, its repair rounds and its workers ("editor", "editor-repair-1")."""
+        with self._lock:
+            return sum(c["usd"] for c in self.calls if stage_name(c["stage"]) == stage)
+
+    def by_stage(self) -> dict[str, dict]:
+        """Per stage, in the order the stages first spent: dollars, calls and tokens."""
+        rows: dict[str, dict] = {}
+        with self._lock:
+            for c in self.calls:
+                r = rows.setdefault(stage_name(c["stage"]), {"usd": 0.0, "calls": 0, "input_tokens": 0,
+                                                             "cached_tokens": 0, "output_tokens": 0})
+                r["usd"] += c["usd"]
+                r["calls"] += 1
+                for k in ("input_tokens", "cached_tokens", "output_tokens"):
+                    r[k] += c[k]
+        for r in rows.values():
+            r["usd"] = round(r["usd"], 4)
+        return rows
+
+    def stage_lines(self) -> list[str]:
+        """One line per stage for the run log, so a run's log shows where its money went."""
+        return [f"{name} ${r['usd']:.2f}: {r['calls']} call{'s' if r['calls'] != 1 else ''}, "
+                f"{r['input_tokens'] / 1000:.0f}k tokens in ({r['cached_tokens'] / 1000:.0f}k cached), "
+                f"{r['output_tokens'] / 1000:.1f}k out" for name, r in self.by_stage().items()]
 
     def over_budget(self, reserve_usd: float = 0.0) -> bool:
         """``reserve_usd`` keeps that much of both caps back for later stages (the researchers leave
@@ -281,11 +312,11 @@ class OpenAILLM:
         return parse_json(resp.output_text or "")
 
     def run_tools(self, system: str, user: str, tools: list[Tool], *, stage: str, schema: dict | None = None,
-                  max_turns: int = 6, deadline: float | None = None) -> dict:
+                  max_turns: int = 6, deadline: float | None = None, spend_limit: float | None = None) -> dict:
         """Let the model call ``tools`` for up to ``max_turns`` turns, then return its JSON answer.
 
-        On the last turn, or once ``time.monotonic()`` passes ``deadline``, tools are switched off,
-        so the loop always ends with an answer.
+        On the last turn, once ``time.monotonic()`` passes ``deadline``, or once the stage has spent
+        ``spend_limit`` dollars, tools are switched off, so the loop always ends with an answer.
         """
         by_name = {t.name: t for t in tools}
         specs = [t.spec() for t in tools]
@@ -301,7 +332,8 @@ class OpenAILLM:
                 result = tool.call(c.arguments) if tool else f"error: no tool named {c.name}"
                 log.info("      %s -> %s(%s)", stage, c.name, (c.arguments or "")[:120])
                 outputs.append({"type": "function_call_output", "call_id": c.call_id, "output": result})
-            last = turn == max_turns or (deadline is not None and time.monotonic() >= deadline)
+            last = (turn == max_turns or (deadline is not None and time.monotonic() >= deadline)
+                    or (spend_limit is not None and self.usage.stage_usd(stage_name(stage)) >= spend_limit))
             resp = self._create(stage, instructions=system, input=outputs, previous_response_id=resp.id,
                                 tools=specs, tool_choice="none" if last else "auto", text=text)
             if last:

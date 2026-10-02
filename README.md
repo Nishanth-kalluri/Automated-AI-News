@@ -71,9 +71,13 @@ With `SHORTS_WEB=on` (web research, off by default until the shadow week below s
 Pages are read with Tavily (counted against `SHORTS_TAVILY_MONTHLY_CREDITS`, kept in
 `state/tavily.json`) or the free Jina reader when Tavily is off or out of credits.
 
-Every LLM call is priced and logged in `cost.json`. A run stops calling the LLM at
+Every LLM call is priced and logged in `cost.json`, with a total per stage that the run log and
+the episode email also show. A run stops calling the LLM at
 `SHORTS_BUDGET_USD` (default $0.60) and the month at `SHORTS_MONTHLY_BUDGET_USD` (default $18,
-kept in `state/spend.json`); stages then use their no-key fallbacks.
+kept in `state/spend.json`); stages then use their no-key fallbacks. The editor stops using its
+tools once it has spent 30% of the run's budget and starts no repair round past 50%, so the
+researchers and the writer always have money left. In its prompt, long newsletter links (click
+trackers of a few hundred characters each) are shortened to `link:N`, which costs far fewer tokens.
 
 A run fails instead of uploading when every news source is down, when there's no LLM, when
 there aren't enough solid stories, when the voice left a segment silent, or when a sample story
