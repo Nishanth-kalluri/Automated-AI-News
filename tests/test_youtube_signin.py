@@ -102,3 +102,9 @@ def test_no_reminder_when_the_run_did_not_upload(monkeypatch, tmp_path):
     pipeline.run(replace(rig.cfg, shadow=False), upload=False)
     assert "Renew" not in rig.notes[-1][1]
     assert not (tmp_path / "state" / "youtube_signin.json").exists()
+
+
+def test_the_renew_command_runs_from_the_project_folder_without_activating_anything():
+    from shorts.upload import RENEW_STEPS
+    assert ".venv\\Scripts\\python -m shorts youtube-auth client_secret.json" in RENEW_STEPS
+    assert "activate" not in RENEW_STEPS

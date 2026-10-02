@@ -26,7 +26,9 @@ _URL = re.compile(r"https?://\S+")
 RETRY_STATUSES = (429, 500, 502, 503, 504)  # YouTube busy or down for a moment: resume the upload
 UPLOAD_RETRIES = 5
 RENEW_NOTICE_DAYS = 2  # the email starts reminding this many days before the sign-in ends
-RENEW_STEPS = ("On your PC, run python -m shorts youtube-auth client_secret.json and replace the "
+RENEW_STEPS = ("On your PC, open PowerShell in the Automated-AI-News folder, run "
+               ".venv\\Scripts\\python -m shorts youtube-auth client_secret.json (on a Mac: "
+               ".venv/bin/python -m shorts youtube-auth client_secret.json) and replace the "
                "YOUTUBE_REFRESH_TOKEN secret with the new value.")
 
 
