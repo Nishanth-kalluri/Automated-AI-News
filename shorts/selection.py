@@ -16,6 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from urllib.parse import urlparse
 
 from .checks import check_picks, fatal, norm_url, same_event, similar
 from .content import description_problem, is_aggregator_url, is_newsletter_url, publisher_name
@@ -40,6 +41,16 @@ COVERAGE_IN_PROMPT = 10  # top feed headlines shown with their coverage
 MAX_COVERAGE_CALLS = 10
 MAX_EDITOR_SEARCHES = 3
 MAX_ALTERNATES = 3
+# Newsletter click-tracking links run to hundreds of characters, and an issue has dozens of them: in the
+# editor's prompt, a link longer than this is "link:N on <site>" and becomes the real link again in a pick.
+LONG_LINK = 100
+_LINK_RE = re.compile(r"https?://[^\s)>\]\"'<]+")
+_LINK_REF = re.compile(r"\s*link:(\d+)\b.*", re.I | re.S)
+# Shares of the run's budget: the editor's tool turns end once it has spent the first (its answer comes
+# next, without tools), and no repair round starts after the second, so the researchers and the writer
+# always have money left.
+EDITOR_TOOLS_SHARE = 0.3
+EDITOR_REPAIR_SHARE = 0.5
 
 
 def _norm(title: str) -> str:
@@ -111,6 +122,33 @@ def pick_stories(stories: list[Story], n: int, max_age_hours: float,
     return chosen
 
 
+class ShortLinks:
+    """Long links in the editor's prompt as "link:N on <site>", and back to the real link in its picks."""
+
+    def __init__(self):
+        self.urls: list[str] = []
+        self._ids: dict[str, int] = {}
+
+    def shorten(self, text: str) -> str:
+        def short(m: re.Match) -> str:
+            url = m.group(0).rstrip(".,;:")
+            if len(url) <= LONG_LINK:
+                return m.group(0)
+            if url not in self._ids:
+                self.urls.append(url)
+                self._ids[url] = len(self.urls)
+            return f"link:{self._ids[url]} on {urlparse(url).hostname or 'a link'}{m.group(0)[len(url):]}"
+
+        return _LINK_RE.sub(short, text or "")
+
+    def expand(self, url: str) -> str:
+        """The real link for "link:N" (also "link:N on site"); any other url as it is."""
+        m = _LINK_REF.fullmatch(url or "")
+        if m and 0 < int(m.group(1)) <= len(self.urls):
+            return self.urls[int(m.group(1)) - 1]
+        return url
+
+
 class Editor(Protocol):
     name: str
 
@@ -150,7 +188,8 @@ How to choose:
   site's lines about itself ("in our newsletter", "sign up"). News about Reddit the company is fine.
 
 Return JSON: {"stories": [ ... ]} with up to the requested number of stories, most important first.
-Every url must be copied exactly from the texts; never build or guess a link.
+Every url must be copied exactly from the texts; never build or guess a link. Long links are shortened
+to "link:N on <site>": for one of those, the url is just "link:N".
 Each story: {
   "headline": "on-screen headline, at most 8 words",
   "summary": "3 to 5 sentences with the concrete facts from the texts: who, what, numbers, why it matters",
@@ -187,8 +226,10 @@ class LLMEditor:
 
     def __init__(self, llm: LLM, max_age_hours: float, coverage: Coverage | None = None):
         self.llm, self.max_age_hours, self.coverage = llm, max_age_hours, coverage
+        self.links = ShortLinks()  # the last prompt's shortened links
 
     def _prompt(self, candidates: list[Story], n: int, seen: SeenStore) -> str:
+        self.links = ShortLinks()
         newsletters = [s for s in candidates if s.kind == "newsletter"]
         now = datetime.now(timezone.utc)
         articles = sorted((s for s in candidates if s.kind == "article" and s.title),
@@ -197,12 +238,14 @@ class LLMEditor:
         parts = [f"Today is {date.today().isoformat()}. Pick up to {n} stories: fewer if there aren't {n} solid, "
                  "different news events.\n"]
         for i, s in enumerate(newsletters, 1):
-            parts.append(f"=== NEWSLETTER {i}: {s.source} | {s.title} | {s.published:%Y-%m-%d %H:%M} UTC ===\n{s.body}\n")
+            parts.append(f"=== NEWSLETTER {i}: {s.source} | {s.title} | {s.published:%Y-%m-%d %H:%M} UTC ===\n"
+                         f"{self.links.shorten(s.body)}\n")
         if articles:
             notes = self._coverage_notes(articles)
             parts.append("=== FEED HEADLINES (source | published | title | url | snippet"
                          f"{' | coverage' if notes else ''}) ===")
-            parts += [f"- {s.source} | {s.published:%m-%d %H:%M} | {s.title} | {s.url} | {s.summary[:200]}"
+            parts += [f"- {s.source} | {s.published:%m-%d %H:%M} | {s.title} | {self.links.shorten(s.url)} | "
+                      f"{s.summary[:200]}"
                       f"{notes.get(id(s), '')}" for s in articles]
         recent = seen.recent_headlines()
         if recent:
@@ -230,18 +273,20 @@ class LLMEditor:
     def pick(self, candidates: list[Story], n: int, seen: SeenStore) -> list[Story]:
         system = EDITOR_SYSTEM + (COVERAGE_NOTE if self.coverage is not None else "")
         data = self.llm.json(system, self._prompt(candidates, n, seen), stage="editor", schema=EDITOR_SCHEMA)
-        return self.to_stories(data, candidates, n)
+        return self.to_stories(data, candidates, n, links=self.links)
 
     @staticmethod
-    def to_stories(data: dict, candidates: list[Story], n: int, quiet: bool = False) -> list[Story]:
+    def to_stories(data: dict, candidates: list[Story], n: int, quiet: bool = False,
+                   links: ShortLinks | None = None) -> list[Story]:
         """Editor JSON -> Stories. A link that matches a feed article or a web search hit takes its
-        date and publisher."""
+        date and publisher. ``links`` turns the prompt's "link:N" back into real links."""
         now = datetime.now(timezone.utc)
         articles = {norm_url(c.url): c for c in candidates if c.kind in ("article", "web") and c.url}
         picked = []
         for item in (data.get("stories") or [])[:n]:
             outlets = [o for o in item.get("outlets", []) if o] or ["AI newsletters"]
             url = (item.get("url") or "").strip()
+            url = links.expand(url) if links else url
             if is_newsletter_url(url):
                 url = ""  # the newsletter's own web copy is never the source; research finds the original
             match = articles.get(norm_url(url))
@@ -399,20 +444,26 @@ class AgentEditor:
             system = (EDITOR_SYSTEM + coverage_note + tools_note
                       + (COVERAGE_TOOL_NOTE if "coverage" in names else "")
                       + (SEARCH_TOOL_NOTE if "web_search" in names else "") + alternates_note)
-            data = self.llm.run_tools(system, prompt, tools, stage="editor", schema=schema, max_turns=4)
+            data = self.llm.run_tools(system, prompt, tools, stage="editor", schema=schema, max_turns=4,
+                                      spend_limit=self._share(EDITOR_TOOLS_SHARE))
         else:
             data = self.llm.json(EDITOR_SYSTEM + coverage_note + alternates_note, prompt, stage="editor",
                                  schema=schema)
-        picks = LLMEditor.to_stories(data, candidates, n)
+        links = self.base.links
+        picks = LLMEditor.to_stories(data, candidates, n, links=links)
         if self.web:
             self.alternates = LLMEditor.to_stories({"stories": data.get("alternates") or []}, candidates,
-                                                   MAX_ALTERNATES, quiet=True)
+                                                   MAX_ALTERNATES, quiet=True, links=links)
         for round_no in range(1, self.max_repairs + 1):
             issues = fatal(check_picks(picks, candidates, n, seen.urls, seen.recent_headlines(SeenStore.KEEP_DAYS),
                                        self.max_age_hours, min_n=self.min_stories))
             if not issues:
                 break
             log.info("      editor repair round %d: %s", round_no, "; ".join(i.detail for i in issues))
+            spent, limit = self._spent(), self._share(EDITOR_REPAIR_SHARE)
+            if limit is not None and spent >= limit:
+                log.warning("      no repair: the editor has spent $%.2f, its share of the run's budget", spent)
+                break
             rows = [{"headline": s.headline, "url": s.url, "key_fact": s.key_fact, "summary": s.summary,
                      "outlets": s.outlets} for s in picks]
             repair = REPAIR_PROMPT.format(picks=json.dumps(rows, indent=1), n=n,
@@ -420,7 +471,7 @@ class AgentEditor:
             try:
                 data = self.llm.json(EDITOR_SYSTEM + coverage_note, prompt + repair,
                                      stage=f"editor-repair-{round_no}", schema=EDITOR_SCHEMA)
-                picks = LLMEditor.to_stories(data, candidates, n) or picks
+                picks = LLMEditor.to_stories(data, candidates, n, links=links) or picks
             except BudgetExceeded as exc:
                 log.warning("      %s", exc)
                 break
@@ -428,6 +479,16 @@ class AgentEditor:
                 log.warning("      editor repair failed (%s); keeping the current picks", exc)
                 break
         return picks
+
+
+    def _share(self, share: float) -> float | None:
+        """That share of the run's budget in dollars; None without a cap."""
+        cap = getattr(getattr(self.llm, "usage", None), "run_cap_usd", None)
+        return cap * share if isinstance(cap, (int, float)) and math.isfinite(cap) else None
+
+    def _spent(self) -> float:
+        usage = getattr(self.llm, "usage", None)
+        return usage.stage_usd("editor") if usage is not None else 0.0
 
 
 def _published(day: str, now: datetime) -> datetime:
